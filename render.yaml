@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: thrice-autochess-lobby-test
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
