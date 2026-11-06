@@ -1,0 +1,12 @@
+{
+  "name": "thrice-autochess-lobby-test",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thrice Autochess multiplayer lobby prototype, not synchronized combat",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
