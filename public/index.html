@@ -33,10 +33,10 @@ button:disabled{opacity:.4;cursor:default}
 <div class="panel" id="setup">
 <h2>Connect with a friend</h2>
 <label>Your display name</label><input id="name" maxlength="24" placeholder="Player name" autocomplete="nickname">
-<label>Mode</label><select id="mode"><option value="normalTournament">Normal Tournament</option><option value="rankedTournament">Ranked Tournament (test)</option></select>
+<label>Mode</label><select id="mode"><option value="normal1v1">Normal 1v1 — Play a Friend</option><option value="normalTournament">Normal Tournament</option><option value="rankedTournament">Ranked Tournament (test)</option></select>
 <label>Your test rank</label><select id="tier"><option value="0">Bronze</option><option value="1">Silver</option><option value="2">Gold</option><option value="3">Platinum</option><option value="4">Diamond</option><option value="5">Master</option></select>
 <div style="margin-top:18px" class="actions"><button id="create">Create Lobby</button><button id="join" class="secondary">Join by Code</button></div>
-<div id="joinInput" class="hidden"><label>Six-digit lobby code</label><input id="codeInput" maxlength="6" inputmode="numeric" placeholder="123456"><button style="width:100%;margin-top:10px" id="confirmJoin">Join Lobby</button></div>
+<button class="secondary" id="rankedSolo" style="width:100%;margin-top:12px">Ranked 1v1 — Find Opponent (Solo)</button><div id="soloStatus" class="hidden" style="margin-top:10px;font-size:14px;color:#b7e1f2">Searching for another ranked player… <button id="soloCancel" class="red">Cancel</button></div><div id="joinInput" class="hidden"><label>Six-digit lobby code</label><input id="codeInput" maxlength="6" inputmode="numeric" placeholder="123456"><button style="width:100%;margin-top:10px" id="confirmJoin">Join Lobby</button></div>
 </div>
 <div class="panel hidden" id="roomPanel">
 <div class="row"><h2>Party Lobby</h2><span class="badge" id="modeName"></span></div>
@@ -47,8 +47,19 @@ button:disabled{opacity:.4;cursor:default}
 <div class="actions" style="margin-top:10px"><button id="cancelQueue" class="secondary hidden">Cancel Queue</button><button id="leave" class="red">Leave Lobby</button></div>
 <p class="note" id="queueMsg">The host can search once everyone is ready. Solo queue requires no Ready check.</p>
 </div>
+<div class="panel hidden" id="matchPanel">
+<div class="row"><h2>Online Match Sync Test</h2><span class="badge" id="matchMode"></span></div>
+<p class="note">This screen syncs shared player actions and board/bench positions. The full game combat simulation is not yet online.</p>
+<p id="matchPhase" style="color:#ffd982"></p>
+<div id="sharedPlayers"></div>
+<label>Buy a test die (2g each)</label>
+<div class="actions"><select id="buyKind"><option value="flare">Flare</option><option value="tide">Tide</option><option value="pebble">Pebble</option><option value="bolt">Bolt</option><option value="snowpea">Snowpea</option><option value="spark">Spark</option></select><button id="buyTest">Buy Die</button></div>
+<div class="actions" style="margin-top:12px"><button id="nextPhase" class="secondary">Next Phase</button><button id="endTest" class="red">End Test Match</button></div>
+<button id="forfeitMatch" class="red" style="width:100%;margin-top:10px">Leave Match Permanently</button>
+<h2 style="margin-bottom:7px">Recent Actions</h2><div id="matchEvents" style="max-height:190px;overflow:auto;font-size:12px"></div>
+</div>
 <div id="status" role="status" class="status"></div>
-<p class="note">This is a real shared lobby for testing connections between devices and networks. Combat is <strong>not synchronized</strong>: the current game still uses local AI battles. Lobby data is temporary and may disappear when the free server restarts.</p>
+<p class="note">Normal 1v1 allows one invited friend. Ranked 1v1 uses a separate solo search. Player actions and test-board positions can synchronize online, but the full autochess battle engine is still local. Match instances are temporary.</p>
 </main>
 <script>
 'use strict';
@@ -65,7 +76,7 @@ function localSettings(){const name=E('name').value.trim().replace(/[^\p{L}\p{N}
 function sessionStore(){if(me)sessionStorage.setItem(savedKey,JSON.stringify(me));else sessionStorage.removeItem(savedKey);}
 function paint(r){
  room=r;E('setup').classList.add('hidden');E('roomPanel').classList.remove('hidden');
- E('roomCode').textContent=r.code;E('modeName').textContent=r.mode==='rankedTournament'?'Ranked':'Normal';
+ E('roomCode').textContent=r.code;E('modeName').textContent=r.mode==='rankedTournament'?'Ranked Tournament':r.mode==='normal1v1'?'Normal 1v1':'Normal Tournament';
  E('players').replaceChildren();
  r.players.forEach((p,i)=>{
   const row=document.createElement('div');row.className='player';
@@ -74,12 +85,13 @@ function paint(r){
   row.append(left,right);E('players').append(row);
  });
  const host=r.players[0]?.id===me.meId,myPlayer=r.players.find(p=>p.id===me.meId);
+ if(r.matchId)openSharedMatch(r.matchId,me.token,me.meId);
  E('ready').disabled=r.queued||!myPlayer;E('ready').textContent=myPlayer?.ready?'Cancel Ready':"I'm Ready";
- E('queue').disabled=!host||r.queued||(r.players.length>1&&!r.players.every(p=>p.ready));
+ E('queue').disabled=!host||r.queued||(r.mode==='normal1v1'&&r.players.length!==2)||(r.players.length>1&&!r.players.every(p=>p.ready));
  E('queue').classList.toggle('hidden',r.queued);
  E('cancelQueue').classList.toggle('hidden',!r.queued);
  E('cancelQueue').disabled=!host;
- E('queueMsg').textContent=r.queued?'SEARCHING FOR PLAYERS — Shared lobby is queued. Actual game battles are not synchronized.':(host?'You can queue solo, or have all players mark Ready before joining queue.':'Waiting for the lobby host to join the queue.');
+ E('queueMsg').textContent=r.queued?'SHARED MATCH INSTANCE CREATED — actions can now synchronize.':(host?(r.mode==='normal1v1'?'Invite exactly one friend, both mark Ready, then Join Queue.':'You can queue solo, or have all players mark Ready before joining queue.'):'Waiting for the lobby host to join the queue.');
 }
 function startPoll(){clearInterval(pollId);pollId=setInterval(async()=>{if(!me)return;try{paint(await call('lobby/'+me.code,{},'GET'));}catch(e){show(e.message,true);clearInterval(pollId);}},2500);}
 function enter(response){me={code:response.code,token:response.token,meId:response.meId};sessionStore();paint(response);startPoll();show('Connected to online lobby!');}
@@ -93,5 +105,144 @@ E('cancelQueue').onclick=()=>run(async()=>{paint(await call('cancel',me));show('
 E('leave').onclick=()=>run(async()=>{await call('leave',me);clearInterval(pollId);me=null;room=null;sessionStore();E('roomPanel').classList.add('hidden');E('setup').classList.remove('hidden');show('Left lobby.');});
 E('copyCode').onclick=()=>{const text=room.code;try{navigator.clipboard.writeText(text);show('Code copied: '+text);}catch{show('Share code: '+text);}};
 try{const v=JSON.parse(sessionStorage.getItem(savedKey)||'null');if(v?.code&&v?.token){me=v;call('lobby/'+v.code,{},'GET').then(r=>{paint(r);startPoll();show('Reconnected to lobby.');}).catch(()=>{me=null;sessionStore();});}}catch{}
+
+let onlineMatch=null,matchPoll=null,soloTicket=null,soloPoll=null;
+const matchKey='thriceActiveMatchTest',soloKey='thriceSoloQueueTest';
+function cleanView(){
+ E('setup').classList.remove('hidden');
+ E('roomPanel').classList.add('hidden');
+ E('matchPanel').classList.add('hidden');
+ E('soloStatus').classList.add('hidden');
+}
+async function openSharedMatch(id,token,playerId){
+ if(onlineMatch?.id===id)return;
+ clearInterval(matchPoll);clearInterval(soloPoll);
+ onlineMatch={id,token,playerId,revision:0};
+ sessionStorage.setItem(matchKey,JSON.stringify(onlineMatch));
+ E('setup').classList.add('hidden');E('roomPanel').classList.add('hidden');
+ E('matchPanel').classList.remove('hidden');E('soloStatus').classList.add('hidden');
+ await refreshMatch();
+ matchPoll=setInterval(refreshMatch,1100);
+}
+async function refreshMatch(){
+ if(!onlineMatch)return;
+ try{
+  const state=await call('matchState',{matchId:onlineMatch.id,token:onlineMatch.token,since:onlineMatch.revision});
+  if(state.finished){
+   show('Match test ended ('+state.result.reason+'). The active server instance has been deleted.');
+   clearInterval(matchPoll);onlineMatch=null;sessionStorage.removeItem(matchKey);
+   if(me){cleanView();const r=await call('lobby/'+me.code,{},'GET');paint(r);}
+   else cleanView();
+   return;
+  }
+  onlineMatch.revision=state.state.revision;
+  renderSharedMatch(state.state,state.events);
+ }catch(e){show(e.message,true);clearInterval(matchPoll);}
+}
+function renderSharedMatch(state,events){
+ E('matchMode').textContent=state.mode;
+ E('matchPhase').textContent='Round '+state.round+' · '+state.phase.toUpperCase()+' · version '+state.revision;
+ const container=E('sharedPlayers');
+ container.replaceChildren();
+ for(const p of state.players){
+  const card=document.createElement('div');card.className='player';card.style.display='block';
+  const header=document.createElement('div');header.className='row';
+  const name=document.createElement('strong');name.textContent=p.name+(p.id===onlineMatch.playerId?' (you)':'');
+  const gold=document.createElement('span');gold.className='badge';gold.textContent=p.gold+'g';
+  header.append(name,gold);card.append(header);
+  const subtitle=document.createElement('div');subtitle.style.fontSize='12px';subtitle.style.color='#acbfd4';
+  subtitle.textContent='Board: '+p.dice.filter(d=>d.zone==='board').length+' | Bench: '+p.dice.filter(d=>d.zone==='bench').length;
+  card.append(subtitle);
+  for(const die of p.dice){
+   const wrap=document.createElement('div');wrap.className='row';wrap.style.marginTop='7px';
+   const label=document.createElement('span');label.style.fontSize='12px';label.textContent=die.kind+' · '+die.zone+' '+(die.index+1);
+   wrap.append(label);
+   if(p.id===onlineMatch.playerId){
+    const place=document.createElement('button');place.className='secondary';place.style.padding='5px 7px';
+    const nextZone=die.zone==='bench'?'board':'bench';
+    place.textContent=die.zone==='bench'?'Deploy':'Bench';
+    place.onclick=async()=>{
+     const used=new Set(p.dice.filter(x=>x.zone===nextZone).map(x=>x.index));
+     const max=nextZone==='bench'?8:21;let target=-1;
+     for(let i=0;i<max;i++)if(!used.has(i)){target=i;break;}
+     if(target<0){show('No empty '+nextZone+' slots.',true);return;}
+     await sendAction({type:'move',dieId:die.id,zone:nextZone,index:target});
+    };
+    const sell=document.createElement('button');sell.className='red';sell.style.padding='5px 7px';sell.textContent='Sell';
+    sell.onclick=()=>sendAction({type:'sell',dieId:die.id});
+    const controls=document.createElement('span');controls.style.display='flex';controls.style.gap='5px';controls.append(place,sell);wrap.append(controls);
+   }
+   card.append(wrap);
+  }
+  container.append(card);
+ }
+ E('buyTest').disabled=state.phase!=='preparation';
+ E('nextPhase').disabled=state.players[0].id!==onlineMatch.playerId;
+ E('endTest').disabled=state.players[0].id!==onlineMatch.playerId;
+ if(events?.length){
+  const history=E('matchEvents');
+  for(const ev of events){
+   const el=document.createElement('div');el.textContent='#'+ev.revision+' · '+ev.type+' · '+(ev.playerId||'system')+' '+JSON.stringify(ev.detail);
+   history.prepend(el);
+  }
+  while(history.children.length>60)history.lastChild.remove();
+ }
+}
+async function sendAction(action){
+ if(!onlineMatch)return;
+ try{
+  const state=await call('matchAction',{matchId:onlineMatch.id,token:onlineMatch.token,action,since:onlineMatch.revision});
+  if(state.finished){
+   clearInterval(matchPoll);onlineMatch=null;sessionStorage.removeItem(matchKey);
+   show('Match ended ('+state.result.reason+'). Server instance deleted.');
+   cleanView();if(me){const room=await call('lobby/'+me.code,{},'GET');paint(room);}
+  }else{
+   onlineMatch.revision=state.state.revision;renderSharedMatch(state.state,state.events);
+  }
+ }catch(e){show(e.message,true);}
+}
+E('buyTest').onclick=()=>sendAction({type:'buy',kind:E('buyKind').value});
+E('nextPhase').onclick=()=>{
+ const current=E('matchPhase').textContent.toLowerCase();
+ const phase=current.includes('preparation')?'combat':current.includes('combat')?'results':'preparation';
+ sendAction({type:'phase',phase});
+};
+E('endTest').onclick=()=>sendAction({type:'finish'});
+E('forfeitMatch').onclick=()=>{if(confirm('Leave this match permanently?'))sendAction({type:'forfeit'});};
+E('rankedSolo').onclick=()=>run(async()=>{
+ const d=await call('soloQueue',localSettings());
+ soloTicket={ticketId:d.ticketId,token:d.token};sessionStorage.setItem(soloKey,JSON.stringify(soloTicket));
+ E('soloStatus').classList.remove('hidden');E('rankedSolo').disabled=true;
+ if(d.matchId){openSharedMatch(d.matchId,d.token,null);return;}
+ clearInterval(soloPoll);
+ soloPoll=setInterval(async()=>{
+  if(!soloTicket)return;
+  try{
+   const result=await call('soloStatus',soloTicket);
+   if(result.matchId){
+    clearInterval(soloPoll);E('rankedSolo').disabled=false;
+    sessionStorage.removeItem(soloKey);
+    await openSharedMatch(result.matchId,result.token,null);
+    const snap=await call('matchState',{matchId:result.matchId,token:result.token});
+    onlineMatch.playerId=snap.state.players.find(p=>p.name===E('name').value)?.id||null;
+    renderSharedMatch(snap.state,snap.events);
+    show('Ranked 1v1 test opponent found. No RP is awarded.');
+   }
+  }catch(e){clearInterval(soloPoll);show(e.message,true);}
+ },1400);
+ show('Searching for a ranked 1v1 opponent...');
+});
+E('soloCancel').onclick=()=>run(async()=>{
+ if(!soloTicket)return;
+ await call('soloCancel',soloTicket);
+ soloTicket=null;sessionStorage.removeItem(soloKey);clearInterval(soloPoll);
+ E('soloStatus').classList.add('hidden');E('rankedSolo').disabled=false;
+ show('Ranked 1v1 search cancelled.');
+});
+const savedMatch=JSON.parse(sessionStorage.getItem(matchKey)||'null');
+if(savedMatch?.id&&savedMatch?.token){
+ openSharedMatch(savedMatch.id,savedMatch.token,savedMatch.playerId).catch(()=>{sessionStorage.removeItem(matchKey);cleanView();});
+}
+
 </script>
 </body></html>
