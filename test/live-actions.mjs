@@ -63,6 +63,17 @@ try{
  const receipt=await req('/api/matchState',{matchId:id,token:b.token});
  assert(receipt.finished&&receipt.result.matchId===id,'Opponent cannot see completion receipt');
  checks.push('Instance deleted after match; both players receive result');
+ await req('/api/matchAction',{matchId:id,token:a.token,action:{type:'buy',kind:'flare'}},true);
+ checks.push('Finished match no longer accepts game actions');
+ await req('/api/create',{name:'InvalidParty',mode:'ranked1v1',mmr:1000},true);
+ checks.push('Ranked 1v1 friend lobby prohibited');
+ const normalA=await req('/api/soloQueue',{name:'SoloNormalA',mode:'normal1v1',rankTier:0,mmr:1150});
+ const normalB=await req('/api/soloQueue',{name:'SoloNormalB',mode:'normal1v1',rankTier:0,mmr:1200});
+ const normalCheck=await req('/api/soloStatus',{ticketId:normalA.ticketId,token:normalA.token});
+ assert(normalCheck.matchId===normalB.matchId&&!!normalCheck.matchId,'Normal 1v1 solo pairing failed');
+ await req('/api/matchAction',{matchId:normalCheck.matchId,token:normalA.token,action:{type:'finish'}});
+ checks.push('Normal 1v1 solo option works');
+
  const soloA=await req('/api/soloQueue',{name:'RankedOne',rankTier:2,mmr:1450});
  const soloB=await req('/api/soloQueue',{name:'RankedTwo',rankTier:2,mmr:1500});
  const checkA=await req('/api/soloStatus',{ticketId:soloA.ticketId,token:soloA.token});
