@@ -1,0 +1,32 @@
+name: Online lobby smoke test
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/lobby-smoke.yml
+      - test/live-smoke.mjs
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test live two-player lobby
+        id: smoke
+        continue-on-error: true
+        run: node test/live-smoke.mjs
+      - name: Publish verification status
+        if: always()
+        env:
+          RESULT: ${{ steps.smoke.outcome }}
+        run: |
+          printf '{"result":"%s","date":"%s","type":"live two-player lobby test"}\n' "$RESULT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > smoke-test-result.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add smoke-test-result.json
+          git commit -m "Record lobby smoke-test result" || exit 0
+          git push
