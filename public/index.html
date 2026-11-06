@@ -85,7 +85,7 @@ function paint(r){
   row.append(left,right);E('players').append(row);
  });
  const host=r.players[0]?.id===me.meId,myPlayer=r.players.find(p=>p.id===me.meId);
- if(r.matchId)openSharedMatch(r.matchId,me.token,me.meId);
+ if(r.matchId){clearInterval(pollId);openSharedMatch(r.matchId,me.token,me.meId);return;}
  E('ready').disabled=r.queued||!myPlayer;E('ready').textContent=myPlayer?.ready?'Cancel Ready':"I'm Ready";
  E('queue').disabled=!host||r.queued||(r.mode==='normal1v1'&&r.players.length!==2)||(r.players.length>1&&!r.players.every(p=>p.ready));
  E('queue').classList.toggle('hidden',r.queued);
@@ -116,7 +116,7 @@ function cleanView(){
 }
 async function openSharedMatch(id,token,playerId){
  if(onlineMatch?.id===id)return;
- clearInterval(matchPoll);clearInterval(soloPoll);
+ clearInterval(matchPoll);clearInterval(soloPoll);clearInterval(pollId);
  onlineMatch={id,token,playerId,revision:0};
  sessionStorage.setItem(matchKey,JSON.stringify(onlineMatch));
  E('setup').classList.add('hidden');E('roomPanel').classList.add('hidden');
@@ -136,6 +136,7 @@ async function refreshMatch(){
    return;
   }
   onlineMatch.revision=state.state.revision;
+  if(!onlineMatch.playerId&&state.meId)onlineMatch.playerId=state.meId;
   renderSharedMatch(state.state,state.events);
  }catch(e){show(e.message,true);clearInterval(matchPoll);}
 }
