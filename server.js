@@ -7,24 +7,213 @@ const crypto=require('node:crypto');
 const port=Number(process.env.PORT)||8765;
 const root=path.join(__dirname,'public');
 const rooms=new Map();
-const MODES=new Set(['normalTournament','rankedTournament']);
+
+const matches=new Map();
+const completedMatches=new Map();
+const soloTickets=new Map();
+const DICE_COSTS=Object.freeze({pebble:2,flare:2,tide:2,bolt:2,snowpea:2,spark:2,copper:2,emberseed:2});
+const MATCH_TTL_MS=60*60*1000;
+const RESULT_TTL_MS=2*60*1000;
+const MAX_EVENTS=160;
+const safeSince=n=>clamp(n,0,1000000000,0);
+function createMatch(players,mode,roomCode=''){
+  const id=crypto.randomBytes(12).toString('hex');
+  const match={
+    id,mode,roomCode,phase:'preparation',round:1,createdAt:Date.now(),
+    updatedAt:Date.now(),revision:0,events:[],ended:false,
+    players:players.map(p=>({
+      id:p.id,token:p.token,name:p.name,rankTier:p.rankTier,mmr:p.mmr,
+      gold:12,ready:false,eliminated:false,dice:[],lastEmoteAt:0
+    }))
+  };
+  matches.set(id,match);return match;
+}
+function accessibleMatch(id,token){
+  const m=matches.get(String(id||''));
+  if(!m)throw err('Match ended or expired.',404);
+  const p=m.players.find(p=>p.token===token);
+  if(!p)throw err('Not a participant in this match.',403);
+  return {m,p};
+}
+function publicMatch(m){
+  return {
+    id:m.id,mode:m.mode,phase:m.phase,round:m.round,revision:m.revision,
+    players:m.players.map(p=>({
+      id:p.id,name:p.name,gold:p.gold,ready:p.ready,eliminated:p.eliminated,
+      dice:p.dice.map(d=>({id:d.id,kind:d.kind,zone:d.zone,index:d.index,price:d.price}))
+    }))
+  };
+}
+function record(m,player,type,detail){
+  const event={revision:++m.revision,at:Date.now(),playerId:player?.id||null,type,detail};
+  m.events.push(event);if(m.events.length>MAX_EVENTS)m.events.shift();
+  m.updatedAt=Date.now();return event;
+}
+function shareMatch(m,since=0){
+  return {finished:false,state:publicMatch(m),events:m.events.filter(e=>e.revision>safeSince(since))};
+}
+function finishMatch(m,reason,winnerId=null){
+  if(!matches.has(m.id))return;
+  record(m,null,'match_end',{reason,winnerId});
+  const summary={
+    matchId:m.id,mode:m.mode,reason,winnerId,finishedAt:Date.now(),
+    players:m.players.map(p=>({id:p.id,name:p.name,eliminated:p.eliminated})),
+    lastRevision:m.revision
+  };
+  // Active instance is deleted immediately; only a small, expiring completion receipt remains.
+  matches.delete(m.id);
+  completedMatches.set(m.id,{summary,expiresAt:Date.now()+RESULT_TTL_MS,
+    tokens:new Set(m.players.map(p=>p.token))});
+  if(m.roomCode){
+    const r=rooms.get(m.roomCode);
+    if(r?.matchId===m.id){
+      r.matchId=null;r.queued=false;r.players.forEach(p=>p.ready=false);
+    }
+  }
+  for(const [id,t] of soloTickets)if(t.matchId===m.id)soloTickets.delete(id);
+}
+function assertPreparation(m){
+  if(m.phase!=='preparation')throw err('Dice changes are allowed only during preparation.');
+}
+function takeAction(m,p,a){
+  if(p.eliminated)throw err('Eliminated players cannot act.');
+  const type=String(a.type||'');
+  if(type==='buy'){
+    assertPreparation(m);
+    const kind=String(a.kind||'').toLowerCase();
+    const cost=DICE_COSTS[kind];
+    if(!cost)throw err('Unknown test die.');
+    if(p.gold<cost)throw err('Not enough gold.');
+    const occupied=new Set(p.dice.filter(d=>d.zone==='bench').map(d=>d.index));
+    let index=-1;for(let i=0;i<8;i++)if(!occupied.has(i)){index=i;break;}
+    if(index<0)throw err('Bench full.');
+    const die={id:crypto.randomUUID(),kind,zone:'bench',index,price:cost};
+    p.gold-=cost;p.dice.push(die);
+    record(m,p,'buy',{die:{...die}});return;
+  }
+  if(type==='move'){
+    assertPreparation(m);
+    const die=p.dice.find(d=>d.id===a.dieId);
+    if(!die)throw err('You can only move your own dice.');
+    const zone=a.zone;
+    if(zone!=='bench'&&zone!=='board')throw err('Invalid destination.');
+    const index=clamp(a.index,-1,20,-1);
+    if(index<0||index>=(zone==='bench'?8:21))throw err('Invalid board slot.');
+    const old={zone:die.zone,index:die.index};
+    if(old.zone===zone&&old.index===index)return;
+    const occupying=p.dice.find(d=>d.zone===zone&&d.index===index&&d.id!==die.id);
+    if(occupying){occupying.zone=old.zone;occupying.index=old.index;}
+    die.zone=zone;die.index=index;
+    record(m,p,'move',{dieId:die.id,zone,index,swapId:occupying?.id||null});return;
+  }
+  if(type==='sell'){
+    assertPreparation(m);
+    const i=p.dice.findIndex(d=>d.id===a.dieId);
+    if(i<0)throw err('You can only sell your own dice.');
+    const [d]=p.dice.splice(i,1);
+    const refund=Math.ceil(d.price/2);p.gold+=refund;
+    record(m,p,'sell',{dieId:d.id,refund});return;
+  }
+  if(type==='ready'){
+    p.ready=!!a.ready;record(m,p,'ready',{ready:p.ready});return;
+  }
+  if(type==='emote'){
+    const emote=String(a.emote||'');
+    if(!/^[a-z0-9_-]{1,24}$/i.test(emote))throw err('Invalid emote.');
+    if(Date.now()-p.lastEmoteAt<3000)throw err('Emote cooldown active.');
+    p.lastEmoteAt=Date.now();record(m,p,'emote',{emote});return;
+  }
+  if(type==='forfeit'){
+    p.eliminated=true;record(m,p,'forfeit',{});
+    const survivors=m.players.filter(x=>!x.eliminated);
+    if(survivors.length<=1)finishMatch(m,'last-player-standing',survivors[0]?.id||null);
+    return;
+  }
+  if(type==='phase'){
+    if(m.players[0].id!==p.id)throw err('Only the test host may change the phase.',403);
+    if(!['preparation','combat','results'].includes(a.phase))throw err('Invalid phase.');
+    m.phase=a.phase;
+    if(a.phase==='preparation'&&m.round<100)m.round++;
+    record(m,p,'phase',{phase:m.phase,round:m.round});return;
+  }
+  if(type==='finish'){
+    if(m.players[0].id!==p.id)throw err('Only the test host may end the test instance.',403);
+    finishMatch(m,'host-ended-test');return;
+  }
+  throw err('Unknown or unsupported match action.');
+}
+function matchResponse(id,token,since){
+  const done=completedMatches.get(String(id||''));
+  if(done){
+    if(!done.tokens.has(token))throw err('Not a participant in this match.',403);
+    return {finished:true,result:done.summary,events:[]};
+  }
+  const {m}=accessibleMatch(id,token);
+  return shareMatch(m,since);
+}
+function startSolo(p){
+  const id=crypto.randomUUID();
+  const ticket={id,token:p.token,player:p,createdAt:Date.now(),matchId:null};
+  let opponent=null;
+  for(const t of soloTickets.values()){
+    if(!t.matchId&&Math.abs(t.player.mmr-p.mmr)<=400){opponent=t;break;}
+  }
+  soloTickets.set(id,ticket);
+  if(opponent){
+    const m=createMatch([opponent.player,p],'ranked1v1');
+    opponent.matchId=m.id;ticket.matchId=m.id;
+  }
+  return {ticketId:id,token:ticket.token,matchId:ticket.matchId,waiting:!ticket.matchId};
+}
+
+const MODES=new Set(['normalTournament','rankedTournament','normal1v1']);
 const MAX_BODY=5000;
 const safeName=x=>String(x||'Player').trim().replace(/[^\p{L}\p{N} ]/gu,'').slice(0,24)||'Player';
 const clamp=(x,lo,hi,def)=>Number.isFinite(Number(x))?Math.max(lo,Math.min(hi,Math.floor(Number(x)))):def;
 const send=(res,status,obj)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type'});res.end(JSON.stringify(obj));};
 const publicPlayer=p=>({id:p.id,name:p.name,ready:p.ready,rankTier:p.rankTier,mmr:p.mmr});
-const publicRoom=r=>({code:r.code,mode:r.mode,queued:r.queued,players:r.players.map(publicPlayer),created:r.created});
+const publicRoom=r=>({code:r.code,mode:r.mode,queued:r.queued,matchId:r.matchId||null,players:r.players.map(publicPlayer),created:r.created});
 const err=(message,status=400)=>Object.assign(new Error(message),{status});
 function room(code){const r=rooms.get(String(code||''));if(!r)throw err('Lobby not found or expired.',404);r.lastActive=Date.now();return r;}
 function currentPlayer(r,token){const p=r.players.find(p=>p.token===token);if(!p)throw err('You are not a member of this lobby.',403);return p;}
-setInterval(()=>{const now=Date.now();for(const [code,r] of rooms)if(now-r.lastActive>2*60*60*1000)rooms.delete(code);},10*60*1000).unref();
+setInterval(()=>{
+  const now=Date.now();
+  for(const m of matches.values())if(now-m.updatedAt>MATCH_TTL_MS)finishMatch(m,'inactive-timeout');
+  for(const [id,f] of completedMatches)if(now>f.expiresAt)completedMatches.delete(id);
+  for(const [id,t] of soloTickets)if(now-t.createdAt>10*60*1000&&!t.matchId)soloTickets.delete(id);
+  for(const [code,r] of rooms)if(now-r.lastActive>2*60*60*1000&&!r.matchId)rooms.delete(code);
+},60*1000).unref();
 async function receive(req){let body='';for await(const chunk of req){body+=chunk;if(body.length>MAX_BODY)throw err('Request too long.',413);}try{return JSON.parse(body||'{}');}catch{throw err('Invalid request.');}}
 async function api(req,res,url){
  if(req.method==='GET'&&url.pathname.startsWith('/api/lobby/'))return send(res,200,publicRoom(room(url.pathname.split('/').pop())));
  if(req.method!=='POST')return send(res,405,{error:'Use POST.'});
  const d=await receive(req),a=url.pathname.slice('/api/'.length);
+ 
+ if(a==='matchState')return send(res,200,matchResponse(d.matchId,d.token,d.since||0));
+ if(a==='matchAction'){
+   const {m,p}=accessibleMatch(d.matchId,d.token);
+   takeAction(m,p,d.action||{});
+   return send(res,200,matchResponse(d.matchId,d.token,d.since||0));
+ }
+ if(a==='soloQueue'){
+   const p={id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),
+     name:safeName(d.name),rankTier:clamp(d.rankTier,0,5,0),mmr:clamp(d.mmr,100,5000,1000)};
+   return send(res,200,startSolo(p));
+ }
+ if(a==='soloStatus'){
+   const t=soloTickets.get(String(d.ticketId||''));
+   if(!t||t.token!==d.token)throw err('Solo queue ticket expired.',404);
+   return send(res,200,{waiting:!t.matchId,matchId:t.matchId,token:t.token});
+ }
+ if(a==='soloCancel'){
+   const t=soloTickets.get(String(d.ticketId||''));
+   if(!t||t.token!==d.token)throw err('Solo queue ticket expired.',404);
+   if(t.matchId)throw err('Match already found. Use match forfeit to leave.');
+   soloTickets.delete(t.id);return send(res,200,{cancelled:true});
+ }
+ 
  if(a==='create'){
-  if(!MODES.has(d.mode))throw err('Choose a tournament mode.');
+  if(!MODES.has(d.mode))throw err('Choose Normal 1v1 or a tournament mode.');
   let code;do{code=String(crypto.randomInt(100000,1000000));}while(rooms.has(code));
   const p={id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),name:safeName(d.name),ready:false,mmr:clamp(d.mmr,100,5000,1000),rankTier:clamp(d.rankTier,0,5,0)};
   const r={code,mode:d.mode,queued:false,players:[p],created:Date.now(),lastActive:Date.now()};
@@ -34,7 +223,7 @@ async function api(req,res,url){
  const r=room(d.code);
  if(a==='join'){
   if(r.queued)throw err('This lobby is already in queue.');
-  if(r.players.length>=8)throw err('This lobby is full.');
+  if(r.players.length>=(r.mode==='normal1v1'?2:8))throw err('This lobby is full.');
   const tier=clamp(d.rankTier,0,5,0);
   if(r.mode==='rankedTournament'&&r.players.some(p=>Math.abs(p.rankTier-tier)>1))throw err('Ranked party members must be within one rank tier.');
   const p={id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),name:safeName(d.name),ready:false,mmr:clamp(d.mmr,100,5000,1000),rankTier:tier};
@@ -45,12 +234,19 @@ async function api(req,res,url){
  if(a==='ready'){p.ready=!!d.ready;return send(res,200,publicRoom(r));}
  if(a==='queue'){
   if(!host)throw err('Only the lobby host can start matchmaking.',403);
+  if(r.mode==='normal1v1'&&r.players.length!==2)throw err('Normal 1v1 requires two players.');
   if(r.players.length>1&&!r.players.every(p=>p.ready))throw err('All players must be Ready.');
   r.queued=true;
+  const m=createMatch(r.players,r.mode,r.code);
+  r.matchId=m.id;
   return send(res,200,publicRoom(r));
  }
  if(a==='cancel'){
   if(!host)throw err('Only the lobby host can cancel matchmaking.',403);
+  if(r.matchId){
+    const m=matches.get(r.matchId);if(m)finishMatch(m,'queue-cancelled');
+    r.matchId=null;
+  }
   r.queued=false;
   return send(res,200,publicRoom(r));
  }
@@ -61,6 +257,11 @@ async function api(req,res,url){
   return send(res,200,publicRoom(r));
  }
  if(a==='leave'){
+  if(r.matchId){
+    const m=matches.get(r.matchId);
+    const inMatch=m?.players.find(member=>member.id===p.id);
+    if(m&&inMatch&&!inMatch.eliminated)takeAction(m,inMatch,{type:'forfeit'});
+  }
   r.players=r.players.filter(member=>member.id!==p.id);
   if(!r.players.length)rooms.delete(r.code);
   else if(host){r.queued=false;r.players.forEach(member=>member.ready=false);}
@@ -72,7 +273,7 @@ http.createServer(async(req,res)=>{
  try{
   if(req.method==='OPTIONS')return send(res,204,{});
   const url=new URL(req.url,'http://localhost');
-  if(req.method==='GET'&&url.pathname==='/health')return send(res,200,{ok:true,service:'Thrice Autochess test lobby',battlesSynchronized:false});
+  if(req.method==='GET'&&url.pathname==='/health')return send(res,200,{ok:true,service:'Thrice Autochess shared action server',sharedActionState:true,battlesSynchronized:false});
   if(url.pathname.startsWith('/api/'))return await api(req,res,url);
   if(!['GET','HEAD'].includes(req.method))return send(res,405,{error:'Method not allowed.'});
   let requested;
