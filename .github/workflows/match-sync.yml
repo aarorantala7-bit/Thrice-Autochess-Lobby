@@ -1,0 +1,34 @@
+name: Shared match action integration test
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - server.js
+      - public/index.html
+      - test/live-actions.mjs
+      - .github/workflows/match-sync.yml
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify deployed server and shared match actions
+        id: test
+        continue-on-error: true
+        run: node test/live-actions.mjs
+      - name: Publish test result
+        if: always()
+        env:
+          RESULT: ${{ steps.test.outcome }}
+        run: |
+          printf '{"result":"%s","timestamp":"%s","test":"two-player shared match actions and cleanup"}\n' "$RESULT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > match-sync-test-result.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add match-sync-test-result.json
+          git commit -m "Record shared-match live test result" || exit 0
+          git push
