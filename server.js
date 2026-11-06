@@ -153,14 +153,14 @@ function matchResponse(id,token,since){
 }
 function startSolo(p){
   const id=crypto.randomUUID();
-  const ticket={id,token:p.token,player:p,createdAt:Date.now(),matchId:null};
+  const ticket={id,token:p.token,mode:p.mode,player:p,createdAt:Date.now(),matchId:null};
   let opponent=null;
   for(const t of soloTickets.values()){
-    if(!t.matchId&&Math.abs(t.player.mmr-p.mmr)<=400){opponent=t;break;}
+    if(!t.matchId&&t.mode===p.mode&&Math.abs(t.player.mmr-p.mmr)<=400){opponent=t;break;}
   }
   soloTickets.set(id,ticket);
   if(opponent){
-    const m=createMatch([opponent.player,p],'ranked1v1');
+    const m=createMatch([opponent.player,p],p.mode);
     opponent.matchId=m.id;ticket.matchId=m.id;
   }
   return {ticketId:id,token:ticket.token,matchId:ticket.matchId,waiting:!ticket.matchId};
@@ -197,7 +197,7 @@ async function api(req,res,url){
  }
  if(a==='soloQueue'){
    const p={id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),
-     name:safeName(d.name),rankTier:clamp(d.rankTier,0,5,0),mmr:clamp(d.mmr,100,5000,1000)};
+     name:safeName(d.name),mode:d.mode==='normal1v1'?'normal1v1':'ranked1v1',rankTier:clamp(d.rankTier,0,5,0),mmr:clamp(d.mmr,100,5000,1000)};
    return send(res,200,startSolo(p));
  }
  if(a==='soloStatus'){
