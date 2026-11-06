@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Thrice Autochess — Lobby Test</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif}*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(circle at 50% 0,#42316d 0,#161a2d 58%,#0c101b 100%);color:#fff7e9;min-height:100vh}
+main{max-width:470px;margin:auto;padding:20px 16px 40px}
+h1{font-family:Georgia,serif;font-size:36px;color:#f5cc79;text-shadow:0 3px #291847;text-align:center;margin:23px 0 2px}
+small{color:#b9b2cb}h2{font:700 22px Georgia,serif;color:#ffd684}
+.subtitle{text-align:center;letter-spacing:.21em;color:#d7b9ec;font-size:11px;margin-bottom:24px}
+.panel{background:#202c42;border:1px solid #8268a6;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 7px 22px #0004}
+.row{display:flex;gap:10px;align-items:center;justify-content:space-between}.row>*{min-width:0}
+input,select{font:inherit;border-radius:9px;border:1px solid #59718f;background:#111c31;color:white;padding:12px;width:100%;min-width:0}
+label{display:block;font-size:13px;color:#e2dcf5;margin:12px 0 5px}
+button{font:700 15px Georgia,serif;color:#201b28;background:linear-gradient(#ffe8a1,#d2933d);border:2px solid #ffe6a0;border-radius:10px;padding:12px 14px;cursor:pointer;box-shadow:0 3px #684829}
+button.secondary{background:linear-gradient(#344a6c,#23364d);border-color:#647ca0;color:#fff}
+button.red{background:linear-gradient(#8a445d,#65233b);color:white;border-color:#d6757c}
+button:disabled{opacity:.4;cursor:default}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:9px}.actions button{width:100%}
+.badge{background:#172338;border:1px solid #6a8fa7;border-radius:7px;padding:5px 9px;font-size:12px}
+.code{font-size:34px;color:#ffd879;font-weight:900;letter-spacing:.2em;text-align:center;margin:8px}
+.player{border:1px solid #51617e;border-radius:9px;padding:10px;margin:7px 0;display:flex;justify-content:space-between;align-items:center}
+.status{margin:16px 0;color:#c9e6f3;min-height:22px;font-size:14px}
+.error{color:#ffb5b5}.hidden{display:none!important}
+.note{font-size:12px;line-height:1.5;color:#b9b2cb;text-align:center}
+</style>
+</head>
+<body>
+<main>
+<h1>THRICE</h1><div class="subtitle">AUTOCHESS · ONLINE LOBBY TEST</div>
+<div class="panel" id="setup">
+<h2>Connect with a friend</h2>
+<label>Your display name</label><input id="name" maxlength="24" placeholder="Player name" autocomplete="nickname">
+<label>Mode</label><select id="mode"><option value="normalTournament">Normal Tournament</option><option value="rankedTournament">Ranked Tournament (test)</option></select>
+<label>Your test rank</label><select id="tier"><option value="0">Bronze</option><option value="1">Silver</option><option value="2">Gold</option><option value="3">Platinum</option><option value="4">Diamond</option><option value="5">Master</option></select>
+<div style="margin-top:18px" class="actions"><button id="create">Create Lobby</button><button id="join" class="secondary">Join by Code</button></div>
+<div id="joinInput" class="hidden"><label>Six-digit lobby code</label><input id="codeInput" maxlength="6" inputmode="numeric" placeholder="123456"><button style="width:100%;margin-top:10px" id="confirmJoin">Join Lobby</button></div>
+</div>
+<div class="panel hidden" id="roomPanel">
+<div class="row"><h2>Party Lobby</h2><span class="badge" id="modeName"></span></div>
+<div class="code" id="roomCode">------</div>
+<div class="row"><small>Share this code with a friend</small><button class="secondary" id="copyCode">Copy Code</button></div>
+<div id="players"></div>
+<div class="actions"><button id="ready">I'm Ready</button><button id="queue">Join Queue</button></div>
+<div class="actions" style="margin-top:10px"><button id="cancelQueue" class="secondary hidden">Cancel Queue</button><button id="leave" class="red">Leave Lobby</button></div>
+<p class="note" id="queueMsg">The host can search once everyone is ready. Solo queue requires no Ready check.</p>
+</div>
+<div id="status" role="status" class="status"></div>
+<p class="note">This is a real shared lobby for testing connections between devices and networks. Combat is <strong>not synchronized</strong>: the current game still uses local AI battles. Lobby data is temporary and may disappear when the free server restarts.</p>
+</main>
+<script>
+'use strict';
+const E=id=>document.getElementById(id);
+let me=null,room=null,pollId=null;
+const savedKey='thriceLobbyTest';
+E('name').value=localStorage.getItem('thriceTestName')||'';
+function show(message,error=false){E('status').textContent=message;E('status').className='status'+(error?' error':'');}
+async function call(endpoint,data={},method='POST'){
+ const response=await fetch('/api/'+endpoint,{method,headers:{'Content-Type':'application/json'},...(method==='POST'?{body:JSON.stringify(data)}:{})});
+ const body=await response.json();if(!response.ok)throw new Error(body.error||'Network error');return body;
+}
+function localSettings(){const name=E('name').value.trim().replace(/[^\p{L}\p{N} ]/gu,'').slice(0,24)||'Player';localStorage.setItem('thriceTestName',name);return {name,mode:E('mode').value,rankTier:Number(E('tier').value),mmr:1000};}
+function sessionStore(){if(me)sessionStorage.setItem(savedKey,JSON.stringify(me));else sessionStorage.removeItem(savedKey);}
+function paint(r){
+ room=r;E('setup').classList.add('hidden');E('roomPanel').classList.remove('hidden');
+ E('roomCode').textContent=r.code;E('modeName').textContent=r.mode==='rankedTournament'?'Ranked':'Normal';
+ E('players').replaceChildren();
+ r.players.forEach((p,i)=>{
+  const row=document.createElement('div');row.className='player';
+  const left=document.createElement('span');left.textContent=(i===0?'👑 ':'')+p.name+(p.id===me.meId?' (you)':'');
+  const right=document.createElement('span');right.className='badge';right.textContent=p.ready?'READY':'NOT READY';
+  row.append(left,right);E('players').append(row);
+ });
+ const host=r.players[0]?.id===me.meId,myPlayer=r.players.find(p=>p.id===me.meId);
+ E('ready').disabled=r.queued||!myPlayer;E('ready').textContent=myPlayer?.ready?'Cancel Ready':"I'm Ready";
+ E('queue').disabled=!host||r.queued||(r.players.length>1&&!r.players.every(p=>p.ready));
+ E('queue').classList.toggle('hidden',r.queued);
+ E('cancelQueue').classList.toggle('hidden',!r.queued);
+ E('cancelQueue').disabled=!host;
+ E('queueMsg').textContent=r.queued?'SEARCHING FOR PLAYERS — Shared lobby is queued. Actual game battles are not synchronized.':(host?'You can queue solo, or have all players mark Ready before joining queue.':'Waiting for the lobby host to join the queue.');
+}
+function startPoll(){clearInterval(pollId);pollId=setInterval(async()=>{if(!me)return;try{paint(await call('lobby/'+me.code,{},'GET'));}catch(e){show(e.message,true);clearInterval(pollId);}},2500);}
+function enter(response){me={code:response.code,token:response.token,meId:response.meId};sessionStore();paint(response);startPoll();show('Connected to online lobby!');}
+async function run(f){try{show('Connecting…');await f();}catch(e){show(e.message,true);}}
+E('create').onclick=()=>run(async()=>enter(await call('create',localSettings())));
+E('join').onclick=()=>E('joinInput').classList.toggle('hidden');
+E('confirmJoin').onclick=()=>run(async()=>enter(await call('join',{...localSettings(),code:E('codeInput').value.trim()})));
+E('ready').onclick=()=>run(async()=>{paint(await call('ready',{...me,ready:!room.players.find(p=>p.id===me.meId)?.ready}));show('Readiness updated.');});
+E('queue').onclick=()=>run(async()=>{paint(await call('queue',me));show('Lobby is searching for players.');});
+E('cancelQueue').onclick=()=>run(async()=>{paint(await call('cancel',me));show('Queue cancelled.');});
+E('leave').onclick=()=>run(async()=>{await call('leave',me);clearInterval(pollId);me=null;room=null;sessionStore();E('roomPanel').classList.add('hidden');E('setup').classList.remove('hidden');show('Left lobby.');});
+E('copyCode').onclick=()=>{const text=room.code;try{navigator.clipboard.writeText(text);show('Code copied: '+text);}catch{show('Share code: '+text);}};
+try{const v=JSON.parse(sessionStorage.getItem(savedKey)||'null');if(v?.code&&v?.token){me=v;call('lobby/'+v.code,{},'GET').then(r=>{paint(r);startPoll();show('Reconnected to lobby.');}).catch(()=>{me=null;sessionStore();});}}catch{}
+</script>
+</body></html>
