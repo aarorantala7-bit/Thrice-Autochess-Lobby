@@ -148,8 +148,8 @@ function matchResponse(id,token,since){
     if(!done.tokens.has(token))throw err('Not a participant in this match.',403);
     return {finished:true,result:done.summary,events:[]};
   }
-  const {m}=accessibleMatch(id,token);
-  return shareMatch(m,since);
+  const {m,p}=accessibleMatch(id,token);
+  return {...shareMatch(m,since),meId:p.id};
 }
 function startSolo(p){
   const id=crypto.randomUUID();
@@ -273,7 +273,7 @@ http.createServer(async(req,res)=>{
  try{
   if(req.method==='OPTIONS')return send(res,204,{});
   const url=new URL(req.url,'http://localhost');
-  if(req.method==='GET'&&url.pathname==='/health')return send(res,200,{ok:true,service:'Thrice Autochess shared action server',sharedActionState:true,battlesSynchronized:false});
+  if(req.method==='GET'&&url.pathname==='/health')return send(res,200,{ok:true,service:'Thrice Autochess shared action server',sharedActionState:true,activeMatchCount:matches.size,battlesSynchronized:false});
   if(url.pathname.startsWith('/api/'))return await api(req,res,url);
   if(!['GET','HEAD'].includes(req.method))return send(res,405,{error:'Method not allowed.'});
   let requested;
