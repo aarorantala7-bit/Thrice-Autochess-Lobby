@@ -36,7 +36,7 @@ button:disabled{opacity:.4;cursor:default}
 <label>Mode</label><select id="mode"><option value="normal1v1">Normal 1v1 — Play a Friend</option><option value="normalTournament">Normal Tournament</option><option value="rankedTournament">Ranked Tournament (test)</option></select>
 <label>Your test rank</label><select id="tier"><option value="0">Bronze</option><option value="1">Silver</option><option value="2">Gold</option><option value="3">Platinum</option><option value="4">Diamond</option><option value="5">Master</option></select>
 <div style="margin-top:18px" class="actions"><button id="create">Create Lobby</button><button id="join" class="secondary">Join by Code</button></div>
-<button class="secondary" id="rankedSolo" style="width:100%;margin-top:12px">Ranked 1v1 — Find Opponent (Solo)</button><div id="soloStatus" class="hidden" style="margin-top:10px;font-size:14px;color:#b7e1f2">Searching for another ranked player… <button id="soloCancel" class="red">Cancel</button></div><div id="joinInput" class="hidden"><label>Six-digit lobby code</label><input id="codeInput" maxlength="6" inputmode="numeric" placeholder="123456"><button style="width:100%;margin-top:10px" id="confirmJoin">Join Lobby</button></div>
+<button class="secondary" id="normalSolo" style="width:100%;margin-top:12px">Normal 1v1 — Find Random Opponent</button><button class="secondary" id="rankedSolo" style="width:100%;margin-top:10px">Ranked 1v1 — Find Opponent (Solo)</button><div id="soloStatus" class="hidden" style="margin-top:10px;font-size:14px;color:#b7e1f2">Searching for another ranked player… <button id="soloCancel" class="red">Cancel</button></div><div id="joinInput" class="hidden"><label>Six-digit lobby code</label><input id="codeInput" maxlength="6" inputmode="numeric" placeholder="123456"><button style="width:100%;margin-top:10px" id="confirmJoin">Join Lobby</button></div>
 </div>
 <div class="panel hidden" id="roomPanel">
 <div class="row"><h2>Party Lobby</h2><span class="badge" id="modeName"></span></div>
@@ -210,34 +210,38 @@ E('nextPhase').onclick=()=>{
 };
 E('endTest').onclick=()=>sendAction({type:'finish'});
 E('forfeitMatch').onclick=()=>{if(confirm('Leave this match permanently?'))sendAction({type:'forfeit'});};
-E('rankedSolo').onclick=()=>run(async()=>{
- const d=await call('soloQueue',localSettings());
- soloTicket={ticketId:d.ticketId,token:d.token};sessionStorage.setItem(soloKey,JSON.stringify(soloTicket));
- E('soloStatus').classList.remove('hidden');E('rankedSolo').disabled=true;
- if(d.matchId){openSharedMatch(d.matchId,d.token,null);return;}
- clearInterval(soloPoll);
- soloPoll=setInterval(async()=>{
-  if(!soloTicket)return;
-  try{
-   const result=await call('soloStatus',soloTicket);
-   if(result.matchId){
-    clearInterval(soloPoll);E('rankedSolo').disabled=false;
-    sessionStorage.removeItem(soloKey);
-    await openSharedMatch(result.matchId,result.token,null);
-    const snap=await call('matchState',{matchId:result.matchId,token:result.token});
-    onlineMatch.playerId=snap.state.players.find(p=>p.name===E('name').value)?.id||null;
-    renderSharedMatch(snap.state,snap.events);
-    show('Ranked 1v1 test opponent found. No RP is awarded.');
-   }
-  }catch(e){clearInterval(soloPoll);show(e.message,true);}
- },1400);
- show('Searching for a ranked 1v1 opponent...');
-});
+
+async function startDirectSearch(mode){
+ try{
+  show('Connecting to '+(mode==='ranked1v1'?'Ranked':'Normal')+' 1v1 queue...');
+  const d=await call('soloQueue',{...localSettings(),mode});
+  soloTicket={ticketId:d.ticketId,token:d.token};
+  sessionStorage.setItem(soloKey,JSON.stringify(soloTicket));
+  E('soloStatus').classList.remove('hidden');E('rankedSolo').disabled=true;E('normalSolo').disabled=true;
+  if(d.matchId){await openSharedMatch(d.matchId,d.token,null);return;}
+  clearInterval(soloPoll);
+  soloPoll=setInterval(async()=>{
+   if(!soloTicket)return;
+   try{
+    const result=await call('soloStatus',soloTicket);
+    if(result.matchId){
+     clearInterval(soloPoll);E('rankedSolo').disabled=false;E('normalSolo').disabled=false;
+     sessionStorage.removeItem(soloKey);
+     await openSharedMatch(result.matchId,result.token,null);
+     show((mode==='ranked1v1'?'Ranked':'Normal')+' 1v1 opponent found! This is an action-sync test, not a full battle.');
+    }
+   }catch(e){clearInterval(soloPoll);show(e.message,true);E('rankedSolo').disabled=false;E('normalSolo').disabled=false;}
+  },1400);
+  show('Searching for an opponent...');
+ }catch(e){show(e.message,true);}
+}
+E('rankedSolo').onclick=()=>startDirectSearch('ranked1v1');
+E('normalSolo').onclick=()=>startDirectSearch('normal1v1');
 E('soloCancel').onclick=()=>run(async()=>{
  if(!soloTicket)return;
  await call('soloCancel',soloTicket);
  soloTicket=null;sessionStorage.removeItem(soloKey);clearInterval(soloPoll);
- E('soloStatus').classList.add('hidden');E('rankedSolo').disabled=false;
+ E('soloStatus').classList.add('hidden');E('rankedSolo').disabled=false;E('normalSolo').disabled=false;
  show('Ranked 1v1 search cancelled.');
 });
 const savedMatch=JSON.parse(sessionStorage.getItem(matchKey)||'null');
