@@ -9,7 +9,7 @@ try{
  for(let i=0;i<5;i++){try{health=await req('/health');break;}catch(e){if(i===4)throw e;await new Promise(r=>setTimeout(r,10000));}}
  if(!health.ok)throw Error('Health check failed');
  host=await req('/api/create',{name:'TestHost',mode:'normalTournament',rankTier:0,mmr:1000});
- if(!/^\\d{6}$/.test(host.code))throw Error('Invalid lobby code');
+ if(!/^\d{6}$/.test(host.code))throw Error('Invalid lobby code');
  guest=await req('/api/join',{code:host.code,name:'TestGuest',rankTier:0,mmr:1000});
  if(guest.players.length!==2)throw Error('Joining failed');
  let state=await req('/api/lobby/'+host.code);
