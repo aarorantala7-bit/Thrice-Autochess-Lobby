@@ -376,3 +376,169 @@ api=async function(req,res,url){
  return v230ServerApi(req,res,url);
 };
 setInterval(()=>{const now=Date.now();for(const m of [...matches.values()])v230TryPhaseAdvance(m,now);},500).unref();
+
+// ===== Thrice Autochess v0.23.0b: solo and party matchmaking =====
+// Adds server-authoritative queue membership, party caps and matchmaking.
+// Ranked 1v1 is strictly solo-only (no joining a friend's lobby).
+// Normal Tournament may use local AI fillers in the gameplay prototype;
+// Ranked Tournament waits for 8 real online queue participants.
+const V230B_MATCHMAKER_VERSION = 1;
+const V230B_PARTY_LIMITS = Object.freeze({normal1v1:2, ranked1v1:1, normalTournament:8, rankedTournament:4});
+const V230B_GAME_SIZES = Object.freeze({normal1v1:2, ranked1v1:2, normalTournament:8, rankedTournament:8});
+const V230B_WAIT_LIMIT_MS = 10*60*1000;
+MODES.add('ranked1v1');
+
+function v230bValidParty(r){
+  const max=V230B_PARTY_LIMITS[r.mode];
+  if(!max || !r.players.length || r.players.length>max)return false;
+  if(r.mode==='rankedTournament'){
+    const tiers=r.players.map(p=>p.rankTier);
+    if(Math.max(...tiers)-Math.min(...tiers)>1)return false;
+  }
+  return true;
+}
+function v230bCompatible(group,next,mode){
+  const all=group.flatMap(r=>r.players).concat(next.players);
+  if(all.length>V230B_GAME_SIZES[mode])return false;
+  if(mode.startsWith('ranked')){
+    const tiers=all.map(p=>Number(p.rankTier)||0);
+    if(Math.max(...tiers)-Math.min(...tiers)>1)return false;
+  }
+  if(mode.endsWith('1v1')){
+    const mmrs=all.map(p=>Number(p.mmr)||1000);
+    if(Math.max(...mmrs)-Math.min(...mmrs)>500)return false;
+  }
+  return true;
+}
+function v230bFindMatchGroup(mode){
+  const all=[...rooms.values()].filter(r=>r.mode===mode&&r.queued&&!r.matchId&&v230bValidParty(r))
+    .sort((a,b)=>(a.queuedAt||a.created)-(b.queuedAt||b.created));
+  if(!all.length)return null;
+  const seats=V230B_GAME_SIZES[mode];
+  const min=mode==='normalTournament'?2:seats;
+  const first=all[0];
+  let best=null,bestCount=0;
+  function search(index,selected,total){
+    if(total>bestCount){best=selected;bestCount=total;}
+    if(total>=seats)return;
+    for(let i=index;i<all.length;i++){
+      const candidate=all[i];
+      if(!v230bCompatible(selected,candidate,mode))continue;
+      search(i+1,[...selected,candidate],total+candidate.players.length);
+      if(bestCount===seats)return;
+    }
+  }
+  search(1,[first],first.players.length);
+  if(bestCount===seats)return best;
+  // Normal Tournament can backfill with local AI, but briefly wait for more real players.
+  if(mode==='normalTournament'&&bestCount>=min&&Date.now()-(first.queuedAt||first.created)>=6000)return best;
+  return null;
+}
+function v230bMatchQueue(mode){
+  let count=0;
+  while(count++<20){
+    const group=v230bFindMatchGroup(mode);
+    if(!group)break;
+    const participants=group.flatMap(r=>r.players);
+    const m=createMatch(participants,mode,group[0].code);
+    m.roomCodes=group.map(r=>r.code);
+    // Preserve the composition at matchmaking time: only 5-8 member friend parties are MMR protected.
+    m.mmrFrozenIds=new Set(group.filter(r=>mode==='normalTournament'&&r.players.length>4)
+      .flatMap(r=>r.players.map(p=>p.id)));
+    m.partySizeByPlayerId=Object.fromEntries(group.flatMap(r=>r.players.map(p=>[p.id,r.players.length])));
+    for(const r of group){r.matchId=m.id;r.queued=true;r.lastActive=Date.now();}
+  }
+}
+const v230bOriginalPublicMatch=publicMatch;
+publicMatch=function(m){
+  const state=v230bOriginalPublicMatch(m);
+  state.players=state.players.map(p=>({...p,
+    mmrFrozen:!!m.mmrFrozenIds?.has(p.id),
+    partySizeAtQueue:m.partySizeByPlayerId?.[p.id]||1
+  }));
+  return state;
+};
+const v230bOriginalFinishMatch=finishMatch;
+finishMatch=function(m,...args){
+  const codes=m?.roomCodes||[];
+  const result=v230bOriginalFinishMatch(m,...args);
+  for(const code of codes){const r=rooms.get(code);
+    if(r?.matchId===m.id){r.matchId=null;r.queued=false;r.queuedAt=null;r.players.forEach(p=>p.ready=false);}
+  }
+  return result;
+};
+const v230bOriginalApi=api;
+api=async function(req,res,url){
+  const pathname=url.pathname;
+  if(req.method==='GET'&&pathname==='/api/matchmakerCapabilities')
+    return send(res,200,{version:V230B_MATCHMAKER_VERSION,protocol:V230_SYNC_PROTOCOL,
+      partyLimits:V230B_PARTY_LIMITS,ranked1v1SoloOnly:true,
+      normalTournamentBotFill:true,normalTournamentMmrProtectionPartySize:5,rankedTournamentPlayers:8});
+  if(req.method==='GET'&&pathname.startsWith('/api/lobby/')){
+    const r=room(pathname.split('/').pop());
+    return send(res,200,{...publicRoom(r),searching:!!r.queued&&!r.matchId,
+      requiredPlayers:V230B_GAME_SIZES[r.mode],currentPartySize:r.players.length});
+  }
+  if(req.method!=='POST'||!['join','queue','cancel','leave','kick','ready'].includes(pathname.slice(5)))
+    return v230bOriginalApi(req,res,url);
+  const d=await receive(req),action=pathname.slice(5),r=room(d.code);
+  if(action==='join'){
+    if(r.queued)throw err('This party is already searching for a match.');
+    if(r.mode==='ranked1v1')throw err('Ranked 1v1 is solo queue only. Friend invitations are disabled.',403);
+    const max=V230B_PARTY_LIMITS[r.mode]||1;
+    if(r.players.length>=max)throw err(r.mode==='rankedTournament'?'Ranked Tournament parties allow you plus three friends (4 total).':'This party is full.');
+    const tier=clamp(d.rankTier,0,5,0);
+    if(r.mode==='rankedTournament'&&r.players.some(p=>Math.abs(p.rankTier-tier)>1))
+      throw err('Ranked Tournament party members must be within one rank tier.');
+    const p={id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),
+      name:safeName(d.name),ready:false,mmr:clamp(d.mmr,100,5000,1000),rankTier:tier};
+    r.players.push(p);r.lastActive=Date.now();
+    return send(res,200,{...publicRoom(r),meId:p.id,token:p.token});
+  }
+  const p=currentPlayer(r,d.token),host=r.players[0]?.id===p.id;
+  if(action==='ready'){
+    if(r.queued)throw err('Cancel matchmaking before changing readiness.');
+    p.ready=!!d.ready;return send(res,200,publicRoom(r));
+  }
+  if(action==='queue'){
+    if(!host)throw err('Only the host can queue this party.',403);
+    if(!v230bValidParty(r))throw err('Party size or rank difference is invalid for this mode.');
+    if(r.queued)return send(res,200,{...publicRoom(r),waiting:!r.matchId});
+    if(r.players.length>1&&!r.players.every(x=>x.ready))throw err('Every party member must select Ready.');
+    if(r.players.length===1)r.players[0].ready=true;
+    r.queued=true;r.queuedAt=Date.now();r.matchId=null;r.lastActive=Date.now();
+    v230bMatchQueue(r.mode);
+    return send(res,200,{...publicRoom(r),waiting:!r.matchId});
+  }
+  if(action==='cancel'){
+    if(!host)throw err('Only the host can cancel a party search.',403);
+    if(r.matchId){const m=matches.get(r.matchId);if(m)finishMatch(m,'queue-cancelled');}
+    r.queued=false;r.queuedAt=null;r.matchId=null;
+    r.players.forEach(x=>x.ready=false);
+    return send(res,200,publicRoom(r));
+  }
+  if(action==='kick'){
+    if(!host)throw err('Only the host can remove a member.',403);
+    if(r.queued)throw err('Cancel matchmaking before changing party members.');
+    if(d.kickId===p.id)throw err('Host cannot kick themselves.');
+    r.players=r.players.filter(x=>x.id!==d.kickId);
+    return send(res,200,publicRoom(r));
+  }
+  if(action==='leave'){
+    if(r.matchId){const m=matches.get(r.matchId);const participant=m?.players.find(x=>x.id===p.id);
+      if(m&&participant&&!participant.eliminated)takeAction(m,participant,{type:'forfeit'});
+    }
+    r.players=r.players.filter(x=>x.id!==p.id);
+    if(r.queued&&!r.matchId){r.queued=false;r.queuedAt=null;r.players.forEach(x=>x.ready=false);}
+    if(!r.players.length)rooms.delete(r.code);
+    else if(host){r.queued=false;r.queuedAt=null;r.players.forEach(x=>x.ready=false);}
+    return send(res,200,{ok:true});
+  }
+  throw err('Unsupported action.',404);
+};
+setInterval(()=>{const now=Date.now();for(const r of rooms.values()){
+  if(r.queued&&!r.matchId&&now-(r.queuedAt||now)>V230B_WAIT_LIMIT_MS){r.queued=false;r.queuedAt=null;r.players.forEach(p=>p.ready=false);}
+}
+// Re-evaluate normal tournament queues after the short human matchmaking window.
+v230bMatchQueue('normalTournament');
+},1000).unref();
