@@ -623,3 +623,36 @@ api=async function(req,res,url){
 // The earlier 0.23.0b periodic matcher only checked Normal Tournament.
 // A lone Normal 1v1 queue needs its own periodic check after the bot wait window.
 setInterval(()=>v230bMatchQueue('normal1v1'),1000).unref();
+
+// ===== Thrice Autochess v0.23.0e: atomic pre-match decline =====
+// Append AFTER v0.23.0, v0.23.0b, and v0.23.0d server patches.
+// Declining a match removes the declining party from matchmaking; other parties
+// resume searching. No pre-match decline is counted as a forfeit or ranked result.
+const V230E_DECLINE_VERSION=1;
+const v230ePreviousApi=api;
+api=async function(req,res,url){
+ if(req.method==='GET'&&url.pathname==='/api/declineCapabilities')
+   return send(res,200,{version:V230E_DECLINE_VERSION,preMatchDecline:true,stopsQueue:true,othersRemainQueued:true});
+ if(url.pathname!=='/api/matchDecline')return v230ePreviousApi(req,res,url);
+ if(req.method!=='POST')return send(res,405,{error:'Use POST.'});
+ const d=await receive(req);
+ const {m,p}=accessibleMatch(d.matchId,d.token);
+ if(m.protocol!==V230_SYNC_PROTOCOL)throw err('Unsupported match protocol.',409);
+ if(m.phase!=='awaiting_acceptance')throw err('This match already started; use the in-game Forfeit button.',409);
+ const codes=(m.roomCodes?.length?m.roomCodes:[m.roomCode]).filter(Boolean);
+ const decliningCode=codes.find(code=>rooms.get(code)?.players.some(member=>member.id===p.id&&member.token===d.token));
+ if(!decliningCode)throw err('Your queue party was not found.',409);
+ const decliningPlayerIds=rooms.get(decliningCode).players.map(member=>member.id);
+ const keepQueued=codes.filter(code=>code!==decliningCode)
+  .map(code=>rooms.get(code)).filter(r=>r?.matchId===m.id);
+ finishMatch(m,'match-declined');
+ const receipt=completedMatches.get(m.id);
+ if(receipt?.summary)receipt.summary.decliningPlayerIds=decliningPlayerIds;
+ // Other human parties never chose Decline; let them resume finding opponents.
+ for(const r of keepQueued){
+   if(!rooms.has(r.code)||r.matchId)continue;
+   r.queued=true;r.queuedAt=Date.now();r.lastActive=Date.now();
+   r.players.forEach(member=>member.ready=true);
+ }
+ return send(res,200,{ok:true,queued:false,matchId:null,code:decliningCode,reason:'match-declined'});
+};
