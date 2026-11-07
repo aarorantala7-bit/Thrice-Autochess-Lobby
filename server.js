@@ -542,3 +542,84 @@ setInterval(()=>{const now=Date.now();for(const r of rooms.values()){
 // Re-evaluate normal tournament queues after the short human matchmaking window.
 v230bMatchQueue('normalTournament');
 },1000).unref();
+
+// ===== Thrice Autochess v0.23.0d: Normal queue AI backfill =====
+// Append AFTER the v0.23.0 phase sync and v0.23.0b matchmaker patches.
+// Ranked matches NEVER receive AI players. This is a test-match feature;
+// server-managed acceptance/phase gates remain authoritative.
+const V230D_BOT_FILL_VERSION=1;
+const V230D_BOT_WAIT_MS=8000;
+const V230D_BOT_NAMES=['FrostMoth','StoneBasilisk','EmberFox','NightOrchid','SilverSalmon',
+ 'IronBadger','DuskFalcon','Tidekeeper','CinderWisp','DawnSeeker','MossViper','CopperOwl',
+ 'MoonRaven','BrightStone','ShadowPip','AuroraKnight','StormHare','AshHollow'];
+const V230D_BOT_BADGES=['','beta','vip_silver','vip_gold','vip_super'];
+const v230dOriginalFindMatchGroup=v230bFindMatchGroup;
+v230bFindMatchGroup=function(mode){
+  const original=v230dOriginalFindMatchGroup(mode);
+  if(mode!=='normal1v1'&&mode!=='normalTournament')return original;
+  const seats=V230B_GAME_SIZES[mode];
+  if(original&&original.reduce((n,r)=>n+r.players.length,0)>=seats)return original;
+  const waiting=[...rooms.values()].filter(r=>r.mode===mode&&r.queued&&!r.matchId&&v230bValidParty(r))
+    .sort((a,b)=>(a.queuedAt||a.created)-(b.queuedAt||b.created));
+  if(!waiting.length)return null;
+  // Give real players time to join. Only backfill after this shared queue deadline.
+  if(Date.now()-(waiting[0].queuedAt||waiting[0].created)<V230D_BOT_WAIT_MS)return null;
+  // The original matchmaker has already chosen the best compatible human group.
+  return original||[waiting[0]];
+};
+const v230dOriginalCreateMatch=createMatch;
+createMatch=function(players,mode,roomCode=''){
+  const humans=players.filter(p=>!p.bot);
+  const seats=(mode==='normal1v1'||mode==='normalTournament')?V230B_GAME_SIZES[mode]:players.length;
+  const count=Math.max(0,seats-players.length);
+  const bots=[];
+  if((mode==='normal1v1'||mode==='normalTournament')&&count){
+    const average=humans.length?Math.round(humans.reduce((n,p)=>n+(Number(p.mmr)||1000),0)/humans.length):1000;
+    const names=[...V230D_BOT_NAMES].sort(()=>Math.random()-.5);
+    const used=new Set(players.map(p=>p.name));
+    for(let i=0;i<count;i++){
+      let name=names[i%names.length];let suffix=2;
+      while(used.has(name))name=names[i%names.length]+suffix++;
+      used.add(name);
+      bots.push({id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),
+        name,bot:true,botBadge:V230D_BOT_BADGES[crypto.randomInt(V230D_BOT_BADGES.length)],
+        mmr:Math.max(100,average+crypto.randomInt(-150,151)),rankTier:humans[0]?.rankTier||0,
+        ready:true});
+    }
+  }
+  const all=players.concat(bots),m=v230dOriginalCreateMatch(all,mode,roomCode);
+  for(const p of m.players){const src=all.find(x=>x.id===p.id);
+    if(src?.bot){p.bot=true;p.botBadge=src.botBadge;p.accepted=true;p.ready=true;}
+  }
+  m.botFillCount=bots.length;
+  m.humanPlayerCount=humans.length;
+  return m;
+};
+const v230dOriginalPublicMatch=publicMatch;
+publicMatch=function(m){
+  const state=v230dOriginalPublicMatch(m);
+  if(m.protocol!==V230_SYNC_PROTOCOL)return state;
+  return {...state,botFillCount:m.botFillCount||0,
+    players:state.players.map(p=>{const src=m.players.find(x=>x.id===p.id);
+      return {...p,bot:!!src?.bot,botBadge:src?.bot?src.botBadge:null};})};
+};
+const v230dOriginalPhaseChange=v230PhaseChange;
+v230PhaseChange=function(m,next){
+  v230dOriginalPhaseChange(m,next);
+  // The phase gate waits for everyone. Bots must be ready each new phase,
+  // so real players are never blocked waiting for an AI client that cannot connect.
+  if(m.protocol===V230_SYNC_PROTOCOL&&matches.has(m.id)){
+    for(const p of m.players)if(p.bot){p.ready=true;m.phaseReady.add(p.id);}
+  }
+};
+const v230dOriginalApi=api;
+api=async function(req,res,url){
+  if(req.method==='GET'&&url.pathname==='/api/botMatchmakingCapabilities')
+    return send(res,200,{version:V230D_BOT_FILL_VERSION,waitMs:V230D_BOT_WAIT_MS,
+      allowedModes:['normal1v1','normalTournament'],rankedBots:false,
+      botsAutoAccept:true,botsAutoReady:true});
+  return v230dOriginalApi(req,res,url);
+};
+// The earlier 0.23.0b periodic matcher only checked Normal Tournament.
+// A lone Normal 1v1 queue needs its own periodic check after the bot wait window.
+setInterval(()=>v230bMatchQueue('normal1v1'),1000).unref();
