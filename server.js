@@ -285,3 +285,94 @@ http.createServer(async(req,res)=>{
   if(req.method==='HEAD')res.end();else fs.createReadStream(abs).pipe(res);
  }catch(e){send(res,e.status||404,{error:e.message||'Not found.'});}
 }).listen(port,'0.0.0.0',()=>console.log('Thrice lobby test listening on port '+port));
+
+// ===== Thrice Autochess v0.23.0 server-side phase synchronization =====
+// Appended to existing server.js. Preserves existing lobby and test-action APIs.
+const V230_SYNC_PROTOCOL=2;
+const V230_ACCEPT_MS=15000;
+const V230_SYNC_TIMEOUT_MS=20000;
+const V230_PHASE_DURATIONS={preparation:45,combat:35,results:10};
+const v230NativeCreateMatch=createMatch;
+createMatch=function(players,mode,roomCode=''){
+ const m=v230NativeCreateMatch(players,mode,roomCode);
+ m.protocol=V230_SYNC_PROTOCOL;
+ m.phase='awaiting_acceptance';m.phaseRevision=0;
+ m.phaseStartsAt=0;m.phaseEndsAt=0;
+ m.acceptDeadline=Date.now()+V230_ACCEPT_MS;
+ m.phaseReady=new Set();
+ for(const p of m.players){p.accepted=false;p.lastSeenAt=Date.now();}
+ return m;
+};
+const v230NativePublicMatch=publicMatch;
+publicMatch=function(m){const data=v230NativePublicMatch(m);
+ if(m.protocol!==V230_SYNC_PROTOCOL)return data;
+ return {...data,protocol:V230_SYNC_PROTOCOL,phaseRevision:m.phaseRevision,
+  phaseStartsAt:m.phaseStartsAt,phaseEndsAt:m.phaseEndsAt,acceptDeadline:m.acceptDeadline,
+  readyCount:m.phaseReady.size,
+  players:data.players.map(p=>({...p,accepted:!!m.players.find(x=>x.id===p.id)?.accepted}))};
+};
+const v230NativeMatchResponse=matchResponse;
+matchResponse=function(id,token,since){
+ const m=matches.get(String(id||''));const p=m?.players.find(x=>x.token===token);
+ if(p)p.lastSeenAt=Date.now();
+ return {...v230NativeMatchResponse(id,token,since),serverNow:Date.now(),protocol:V230_SYNC_PROTOCOL};
+};
+const v230NativeTakeAction=takeAction;
+takeAction=function(m,p,a){if(m.protocol===V230_SYNC_PROTOCOL&&a?.type==='phase')throw err('Phase changes are server-controlled in v0.23.',403);
+ return v230NativeTakeAction(m,p,a);};
+function v230PhaseChange(m,next){
+ if(!matches.has(m.id))return;
+ const now=Date.now();m.phase=next;if(next==='preparation'&&m.phaseRevision>0)m.round++;
+ m.phaseRevision++;m.phaseStartsAt=now+1500;
+ m.phaseEndsAt=m.phaseStartsAt+(next==='preparation'&&m.round>1?35:V230_PHASE_DURATIONS[next])*1000;
+ m.phaseReady.clear();m.players.forEach(p=>p.ready=false);
+ record(m,null,'phase_start',{phase:next,round:m.round,phaseRevision:m.phaseRevision,phaseStartsAt:m.phaseStartsAt,phaseEndsAt:m.phaseEndsAt});
+}
+function v230BeginAfterAccept(m){if(m.phase!=='awaiting_acceptance')return;
+ if(m.players.some(p=>!p.accepted))return;
+ // Initial preparation is round 1; change handler increments rounds only later.
+ v230PhaseChange(m,'preparation');
+}
+function v230TryPhaseAdvance(m,now=Date.now()){
+ if(m.protocol!==V230_SYNC_PROTOCOL||!matches.has(m.id))return;
+ if(m.phase==='awaiting_acceptance'){
+  if(now>=m.acceptDeadline)finishMatch(m,'acceptance-timeout');
+  return;
+ }
+ const live=m.players.filter(p=>!p.eliminated),allReady=live.every(p=>m.phaseReady.has(p.id));
+ if(allReady&&now>=m.phaseEndsAt){
+  const next=m.phase==='preparation'?'combat':m.phase==='combat'?'results':'preparation';
+  v230PhaseChange(m,next);return;
+ }
+ // Never silently continue when a participant is out of sync. End a stalled test
+ // instead of letting one device advance independently forever.
+ if(now>=m.phaseEndsAt+V230_SYNC_TIMEOUT_MS){
+  finishMatch(m,'phase-sync-timeout');
+ }
+}
+const v230ServerApi=api;
+api=async function(req,res,url){
+ if(req.method==='GET'&&url.pathname==='/api/syncCapabilities')
+  return send(res,200,{protocol:V230_SYNC_PROTOCOL,serverNow:Date.now(),phases:['awaiting_acceptance','preparation','combat','results'],battleStateSynchronized:false});
+ if(url.pathname==='/api/matchAccept'||url.pathname==='/api/matchReady'){
+  if(req.method!=='POST')return send(res,405,{error:'Use POST.'});
+  const d=await receive(req),{m,p}=accessibleMatch(d.matchId,d.token);
+  if(m.protocol!==V230_SYNC_PROTOCOL)throw err('Unsupported match protocol.',409);
+  p.lastSeenAt=Date.now();
+  if(url.pathname==='/api/matchAccept'){
+   if(m.phase!=='awaiting_acceptance'&&!p.accepted)throw err('Acceptance is closed.',409);
+   if(m.phase==='awaiting_acceptance'&&Date.now()>m.acceptDeadline)throw err('Acceptance expired.',410);
+   if(!p.accepted){p.accepted=true;record(m,p,'accept',{});v230BeginAfterAccept(m);}
+   return send(res,200,matchResponse(m.id,p.token,d.since||0));
+  }
+  if(!p.accepted)throw err('Accept your match first.',403);
+  if(m.phase==='awaiting_acceptance')throw err('Waiting for other players.',409);
+  if(d.phase!==m.phase||Number(d.round)!==m.round||Number(d.phaseRevision)!==m.phaseRevision)
+   throw err('Phase already moved; fetch fresh match state.',409);
+  if(!m.phaseReady.has(p.id)){m.phaseReady.add(p.id);record(m,p,'phase_ready',{phase:m.phase,round:m.round,revision:m.phaseRevision});}
+  v230TryPhaseAdvance(m);
+  return send(res,200,matchResponse(m.id,p.token,d.since||0));
+ }
+ return v230ServerApi(req,res,url);
+};
+setInterval(()=>{const now=Date.now();for(const m of [...matches.values()])v230TryPhaseAdvance(m,now);},500).unref();
