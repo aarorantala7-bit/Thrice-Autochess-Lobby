@@ -22,17 +22,27 @@ function create({record,finishMatch,clock=Date.now}){
   return m;
  }
  function fields(m){
-  const players=m.players.filter(isLive),boss=isBoss(m.round);
+  const survivors=m.players.filter(isLive),boss=isBoss(m.round);
+  // Rotate the pairing order each round so a single player never receives
+  // the ghost assignment permanently in an odd-survivor tournament.
+  const shift=survivors.length?(m.round-1)%survivors.length:0;
+  const players=boss?survivors:survivors.slice(shift).concat(survivors.slice(0,shift));
+  const eliminated=m.players.filter(p=>p.eliminated);
+  const ghostSource=(!boss&&/tournament/i.test(m.mode||'')&&players.length%2===1&&eliminated.length)
+   ?eliminated[(m.round-1)%eliminated.length]:null;
   m.battlefields=[];m.playerBattleStatus={};
   for(let i=0;i<players.length;i+=boss?1:2){
    const seats=players.slice(i,i+(boss?1:2));
-   m.battlefields.push({id:m.id+':R'+m.round+':'+(boss?'BOSS':'PVP')+(m.battlefields.length+1),round:m.round,phaseRevision:m.phaseRevision,
-    kind:boss?'boss':'pvp',playerIds:seats.map(p=>p.id),status:'in_progress',reports:{},winnerId:null,unverified:false});
+   const ghost=!!ghostSource&&!boss&&seats.length===1;
+   m.battlefields.push({id:m.id+':R'+m.round+':'+(boss?'BOSS':ghost?'GHOST':'PVP')+(m.battlefields.length+1),round:m.round,phaseRevision:m.phaseRevision,
+    kind:boss?'boss':ghost?'ghost':'pvp',playerIds:seats.map(p=>p.id),
+    ghostSourceId:ghost?ghostSource.id:null,ghostDice:ghost?(ghostSource.dice||[]).filter(d=>d.zone==='board').map(d=>({kind:d.kind,index:d.index,rank:d.rank||1})):[],
+    status:'in_progress',reports:{},winnerId:null,unverified:false});
   }
   for(const p of players)m.playerBattleStatus[p.id]=STATUS.FIGHTING;
   m.battleRevision++;
   emit(m,'battlefields_assigned',{round:m.round,phaseRevision:m.phaseRevision,
-   fields:m.battlefields.map(f=>({id:f.id,kind:f.kind,playerIds:f.playerIds}))});
+   fields:m.battlefields.map(f=>({id:f.id,kind:f.kind,playerIds:f.playerIds,ghostSourceId:f.ghostSourceId||null}))});
  }
  function startPhase(m,phase,t=now()){
   if(m.ended)return;
@@ -72,6 +82,12 @@ function create({record,finishMatch,clock=Date.now}){
  function resolveField(m,f){
   if(f.status==='completed')return;
   if(f.kind==='pvp'&&f.playerIds.length===1){finishField(m,f,f.playerIds[0]);return;}
+  if(f.kind==='ghost'){
+   const p=f.playerIds[0],r=f.reports[p];
+   if(r?.aliveUnits===0)finishField(m,f,'ghost',true);
+   else if(r?.claimedEnemyAlive===0)finishField(m,f,p,true);
+   return;
+  }
   if(f.kind==='pvp'){
    const [a,b]=f.playerIds,x=f.reports[a],y=f.reports[b];
    // An OWN zero-survivor report completes the battlefield immediately.
@@ -151,7 +167,7 @@ function create({record,finishMatch,clock=Date.now}){
    initialConnectionChecked:m.initialConnectionChecked,readyCount:m.phaseReady.size,
    battleRevision:m.battleRevision,
    battlefields:m.battlefields.map(f=>({id:f.id,round:f.round,phaseRevision:f.phaseRevision,
-    kind:f.kind,playerIds:f.playerIds,status:f.status,winnerId:f.winnerId,unverified:f.unverified})),
+    kind:f.kind,playerIds:f.playerIds,ghostSourceId:f.ghostSourceId||null,ghostDice:f.ghostDice||[],status:f.status,winnerId:f.winnerId,unverified:f.unverified})),
    playerBattleStatus:{...m.playerBattleStatus},
    players:base.players.map(bp=>{const p=m.players.find(p=>p.id===bp.id);return {...bp,
     accepted:!!p.accepted,connected:!!p.bot||now()-p.lastSeenAt<=OFFLINE_MS,bot:!!p.bot,
