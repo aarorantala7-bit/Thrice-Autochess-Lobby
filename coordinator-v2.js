@@ -76,9 +76,21 @@ function create({record,finishMatch,clock=Date.now}){
    const [a,b]=f.playerIds,x=f.reports[a],y=f.reports[b];
    if(x&&y&&(x.aliveUnits===0||y.aliveUnits===0))
     finishField(m,f,x.aliveUnits>0?a:y.aliveUnits>0?b:null);
+   else {
+    // Bots have no remote client; a human's local AI report is provisional only.
+    const pa=m.players.find(p=>p.id===a),pb=m.players.find(p=>p.id===b);
+    const humanId=pa?.bot&&!pb?.bot?b:pb?.bot&&!pa?.bot?a:null;
+    if(humanId){
+     const rp=f.reports[humanId],botId=humanId===a?b:a;
+     if(rp&&(rp.aliveUnits===0||rp.claimedEnemyAlive===0))
+      finishField(m,f,rp.aliveUnits>0?humanId:botId,true);
+    }
+   }
   }else if(f.kind==='boss'){
    const x=f.reports[f.playerIds[0]];
    if(x?.aliveUnits===0)finishField(m,f,null);
+   else if(x?.claimedEnemyAlive===0&&x.aliveUnits>0)
+    finishField(m,f,f.playerIds[0],true); // local boss simulator; NOT ranked verified
   }
  }
  function battleReport(m,p,d){
@@ -90,7 +102,7 @@ function create({record,finishMatch,clock=Date.now}){
   if(!Number.isInteger(alive)||alive<0||alive>100)throw Error('Invalid surviving unit count');
   seen(m,p);if(f.status==='completed')return;
   const prior=f.reports[p.id];
-  f.reports[p.id]={aliveUnits:alive,at:now()};
+  f.reports[p.id]={aliveUnits:alive,at:now(),claimedEnemyAlive:Number.isInteger(n(d.enemyAliveUnits))&&n(d.enemyAliveUnits)>=0?n(d.enemyAliveUnits):null};
   if(!prior||prior.aliveUnits!==alive){
    m.battleRevision++;emit(m,'battle_status_report',{battlefieldId:f.id,round:m.round,playerId:p.id,aliveUnits:alive},p);
   }
