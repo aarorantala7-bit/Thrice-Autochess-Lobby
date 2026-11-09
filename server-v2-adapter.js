@@ -32,7 +32,7 @@ module.exports=function installV2(ctx){
   if(req.method==='GET'&&route==='/api/syncCapabilities')
    return send(res,200,{protocol:3,serverNow:Date.now(),
     phases:['awaiting_acceptance','connection_check','preparation','prep_sync','combat','results','boss_results','special_shop'],
-    initialConnectionCheckOnce:true,serverOwnedPhaseClock:true,serverTrackedBattleStatus:true,
+    initialConnectionCheckOnce:true,serverOwnedPhaseClock:true,serverOwnedCountdowns:true,phaseTransitionsServerOnly:true,serverTrackedBattleStatus:true,
     authoritativeCombatSimulation:false,battleStatusPollingMs:1000});
   if(req.method!=='POST'||!['/api/matchAccept','/api/matchReady','/api/matchBattleState'].includes(route))
    return oldApi(req,res,url);
