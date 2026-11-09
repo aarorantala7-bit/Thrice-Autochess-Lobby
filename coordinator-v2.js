@@ -74,8 +74,16 @@ function create({record,finishMatch,clock=Date.now}){
   if(f.kind==='pvp'&&f.playerIds.length===1){finishField(m,f,f.playerIds[0]);return;}
   if(f.kind==='pvp'){
    const [a,b]=f.playerIds,x=f.reports[a],y=f.reports[b];
-   if(x&&y&&(x.aliveUnits===0||y.aliveUnits===0))
-    finishField(m,f,x.aliveUnits>0?a:y.aliveUnits>0?b:null);
+   // An OWN zero-survivor report completes the battlefield immediately.
+   // Client-supplied outcomes remain unverified without server combat simulation.
+   if(x?.aliveUnits===0 || y?.aliveUnits===0){
+    finishField(m,f,x?.aliveUnits===0&&y?.aliveUnits===0?null:x?.aliveUnits===0?b:a,true);return;
+   }
+   // A client may have stopped polling when it observed the enemy die;
+   // provisional result for casual/playtest matches only, never ranked rewards.
+   if(x?.claimedEnemyAlive===0 || y?.claimedEnemyAlive===0){
+    finishField(m,f,x?.claimedEnemyAlive===0?a:b,true);return;
+   }
    else {
     // Bots have no remote client; a human's local AI report is provisional only.
     const pa=m.players.find(p=>p.id===a),pb=m.players.find(p=>p.id===b);
