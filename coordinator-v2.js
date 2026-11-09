@@ -163,7 +163,8 @@ function create({record,finishMatch,clock=Date.now}){
  function publicState(m,base){
   if(m.protocol!==3)return base;
   return {...base,protocol:3,phase:m.phase,round:m.round,phaseRevision:m.phaseRevision,
-   phaseStartsAt:m.phaseStartsAt,phaseEndsAt:m.phaseEndsAt,acceptDeadline:m.acceptDeadline,
+   phaseStartsAt:m.phaseStartsAt,phaseEndsAt:m.phaseEndsAt,serverOwnedCountdowns:true,
+   phaseOwner:'server',countdownIntervalMs:1000,acceptDeadline:m.acceptDeadline,
    initialConnectionChecked:m.initialConnectionChecked,readyCount:m.phaseReady.size,
    battleRevision:m.battleRevision,
    battlefields:m.battlefields.map(f=>({id:f.id,round:f.round,phaseRevision:f.phaseRevision,
