@@ -656,3 +656,18 @@ api=async function(req,res,url){
  }
  return send(res,200,{ok:true,queued:false,matchId:null,code:decliningCode,reason:'match-declined'});
 };
+
+
+// ===== Thrice Autochess Multiplayer Coordinator v2 (protocol 3) =====
+// The startup connection check belongs ONLY to the initial match handshake.
+// After Round 1, preparation uses the short prep_sync barrier, not a one-minute wait.
+// The old v0.23 coordinator remains in the file for historical compatibility;
+// its tick skips protocol 3 instances. This integration affects new matches.
+const v2Coordinator=require('./server-v2-adapter')({
+ getCreateMatch:()=>createMatch,setCreateMatch:fn=>{createMatch=fn;},
+ getPublicMatch:()=>publicMatch,setPublicMatch:fn=>{publicMatch=fn;},
+ getMatchResponse:()=>matchResponse,setMatchResponse:fn=>{matchResponse=fn;},
+ getTakeAction:()=>takeAction,setTakeAction:fn=>{takeAction=fn;},
+ getApi:()=>api,setApi:fn=>{api=fn;},
+ matches,record,finishMatch,accessibleMatch,send,receive,err
+});
