@@ -1,0 +1,22 @@
+'use strict';
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const {create}=require('../coordinator-v2');
+test('odd survivor tournament receives one ghost field without reviving the eliminated source',()=>{
+ let clock=0;const events=[];
+ const ctrl=create({clock:()=>clock,record:(m,p,type,detail)=>events.push({type,detail}),finishMatch:(m)=>{m.ended=true;}});
+ const players=Array.from({length:8},(_,i)=>({id:'P'+(i+1),token:'T'+i,eliminated:i===0,bot:false,dice:i===0?[{kind:'flare',zone:'board',index:1}]:[]}));
+ const m={id:'test-match',mode:'normalTournament',round:1,players,ended:false};
+ ctrl.init(m);for(const p of players)ctrl.accept(m,p);
+ clock=1100;ctrl.tick(m);
+ for(let i=0;i<2;i++){for(const p of players.filter(p=>!p.eliminated))ctrl.ready(m,p,{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision});}
+ assert.equal(m.phase,'combat');
+ const ghost=m.battlefields.filter(f=>f.kind==='ghost');
+ assert.equal(ghost.length,1);assert.equal(ghost[0].ghostSourceId,'P1');
+ assert.equal(ghost[0].ghostDice[0].kind,'flare');
+ const active=players.find(p=>p.id===ghost[0].playerIds[0]);
+ ctrl.battleReport(m,active,{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision,battlefieldId:ghost[0].id,aliveUnits:1,enemyAliveUnits:0});
+ assert.equal(ghost[0].status,'completed');
+ assert.equal(m.playerBattleStatus[active.id],'won');
+ assert.equal(players[0].eliminated,true);
+});
