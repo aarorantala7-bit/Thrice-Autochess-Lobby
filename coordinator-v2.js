@@ -321,7 +321,7 @@ function create({record,finishMatch,clock=Date.now}) {
   }
   function publicState(m,base){
     if(m.protocol!==3)return base;
-    return {...base,protocol:3,phase:m.phase,round:m.round,
+    return {...base,protocol:3,serverOwnedCountdowns:true,phase:m.phase,round:m.round,
       phaseRevision:m.phaseRevision,phaseStartsAt:m.phaseStartsAt,phaseEndsAt:m.phaseEndsAt,
       acceptDeadline:m.acceptDeadline,initialConnectionChecked:m.initialConnectionChecked,
       readyCount:liveParticipants(m).filter(p=>m.phaseReady.has(p.id)).length,battleRevision:m.battleRevision,serverAction:serverAction(m),
