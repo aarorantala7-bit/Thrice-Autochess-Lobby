@@ -1,0 +1,25 @@
+name: Thrice protocol-3 AI Ready regression tests
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/v0.25.4.31b-ai-ready
+      - staging/v0.25.4.31-protocol3-postgres
+    paths:
+      - coordinator-v2.js
+      - test/coordinator-ai-ready.test.js
+      - test/coordinator-v2-ghost.test.js
+      - test/coordinator-server-clock.test.js
+      - .github/workflows/coordinator-regression.yml
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run coordinator readiness, clock and ghost tests
+        run: node --test test/coordinator-ai-ready.test.js test/coordinator-v2-ghost.test.js test/coordinator-server-clock.test.js
