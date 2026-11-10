@@ -16,10 +16,14 @@ function create({pool,connectionString,randomBytes=crypto.randomBytes,clock=Date
     credential_hash CHAR(64) NOT NULL,
     created_at_ms BIGINT NOT NULL
   )`).then(()=>true);
+ // Keep the initialization rejection observable to requests without an unhandled rejection.
+ ready.catch(()=>{});
+ const unavailable=()=>Object.assign(new Error('Profile identity database temporarily unavailable'),{status:503});
+ const ensure=async()=>{try{await ready;}catch{throw unavailable();}};
  const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
  const validId=id=>typeof id==='string'&&/^PRF-[A-F0-9]{32}$/.test(id);
  async function register(){
-   await ready;
+   await ensure();
    for(let attempts=0;attempts<4;attempts++){
      const profileId='PRF-'+randomBytes(16).toString('hex').toUpperCase();
      const profileSecret=randomBytes(32).toString('base64url');
@@ -27,19 +31,19 @@ function create({pool,connectionString,randomBytes=crypto.randomBytes,clock=Date
        await pool.query('INSERT INTO thrice_profile_ids (profile_id, credential_hash, created_at_ms) VALUES ($1,$2,$3)',
          [profileId,hash(profileSecret),clock()]);
        return {profileId,profileSecret};
-     }catch(error){if(error?.code!=='23505')throw error;}
+     }catch(error){if(error?.code!=='23505')throw unavailable();}
    }
    throw new Error('Could not allocate unique profile ID');
  }
  async function verify(profileId,profileSecret){
-   await ready;
+   await ensure();
    if(!validId(profileId)||typeof profileSecret!=='string'||profileSecret.length<32||profileSecret.length>128)return false;
-   const rows=await pool.query('SELECT credential_hash FROM thrice_profile_ids WHERE profile_id=$1 LIMIT 1',[profileId]);
+   let rows;try{rows=await pool.query('SELECT credential_hash FROM thrice_profile_ids WHERE profile_id=$1 LIMIT 1',[profileId]);}catch{throw unavailable();}
    const stored=rows.rows?.[0]?.credential_hash;
    if(typeof stored!=='string'||!/^[a-f0-9]{64}$/.test(stored))return false;
    return crypto.timingSafeEqual(Buffer.from(stored,'hex'),Buffer.from(hash(profileSecret),'hex'));
  }
- async function health(){await ready;const r=await pool.query('SELECT 1 AS ok');return r.rows?.[0]?.ok===1;}
+ async function health(){await ensure();try{const r=await pool.query('SELECT 1 AS ok');return r.rows?.[0]?.ok===1;}catch{throw unavailable();}}
  return {register,verify,health,ready,pool};
 }
 module.exports={create};
