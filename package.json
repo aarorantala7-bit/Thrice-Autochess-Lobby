@@ -1,12 +1,9 @@
 {
   "name": "thrice-autochess-lobby-test",
-  "version": "0.1.0",
+  "version": "0.25.4-31-server",
   "private": true,
-  "description": "Thrice Autochess multiplayer lobby prototype, not synchronized combat",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=20"
-  }
+  "description": "Thrice Autochess protocol-3 test multiplayer coordinator and profile-ID registry",
+  "scripts": {"start":"node server.js"},
+  "dependencies": {"pg":"^8.16.3"},
+  "engines":{"node":">=20"}
 }
