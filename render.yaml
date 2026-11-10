@@ -1,6 +1,7 @@
 services:
   - type: web
     name: thrice-autochess-lobby-test
+    branch: staging/v0.25.4.31-protocol3-postgres
     runtime: node
     plan: free
     region: frankfurt
