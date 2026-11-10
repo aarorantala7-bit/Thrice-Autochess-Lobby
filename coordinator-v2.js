@@ -18,8 +18,21 @@ const isBoss = round => round>0 && round%5===0;
 const isLive = p => !p.eliminated;
 const isBot = p => !!p.bot;
 const liveHumans = m => m.players.filter(p=>isLive(p)&&!isBot(p));
+const liveParticipants = m => m.players.filter(isLive);
 const nowReady = (m, now) => liveHumans(m).every(p=>now-p.lastSeenAt<=OFFLINE_MS);
-const allReady = m => liveHumans(m).every(p=>m.phaseReady.has(p.id));
+const READY_PHASES = new Set(['preparation','prep_sync','results','boss_results','special_shop']);
+// Each AI receives a deterministic, per-player/per-phase simulated action time.
+// This is server-owned: the client never submits readiness on behalf of bots.
+function aiReadyDelay(m,p,phase,duration) {
+  let hash=2166136261;
+  const seed=String(p.id)+'|'+m.round+'|'+m.phaseRevision+'|'+phase;
+  for(let i=0;i<seed.length;i++)hash=Math.imul(hash^seed.charCodeAt(i),16777619)>>>0;
+  const portion=(hash%1000)/1000;
+  const range=phase==='preparation'?[0.50,0.82]:
+    phase==='special_shop'?[0.40,0.78]:
+    phase==='prep_sync'?[0.12,0.30]:[0.15,0.48];
+  return Math.min(Math.max(0,duration-250),Math.floor(duration*(range[0]+(range[1]-range[0])*portion)));
+}
 function create({record,finishMatch,clock=Date.now}) {
   if(typeof record!=='function'||typeof finishMatch!=='function')throw Error('Missing record/finishMatch hooks');
   const emit=(m,type,detail,player=null)=>record(m,player,type,detail);
@@ -28,7 +41,7 @@ function create({record,finishMatch,clock=Date.now}) {
   function init(m) {
     const now=current();m.protocol=3;m.phase='awaiting_acceptance';m.round=1;
     m.phaseRevision=0;m.phaseStartsAt=now;m.phaseEndsAt=now+DURATION.awaiting_acceptance;
-    m.acceptDeadline=m.phaseEndsAt;m.phaseReady=new Set();
+    m.acceptDeadline=m.phaseEndsAt;m.phaseReady=new Set();m.aiReadyAt={};
     m.initialConnectionChecked=false;m.initialConnectionStartedAt=0;
     m.battlefields=[];m.playerBattleStatus={};m.battleRevision=0;
     for(const p of m.players){p.accepted=isBot(p);p.lastSeenAt=isBot(p)?now:0;p.connected=isBot(p);p.forfeitedBeforeStart=false;}
@@ -41,8 +54,12 @@ function create({record,finishMatch,clock=Date.now}) {
     if(phase==='preparation')m.initialConnectionChecked=true;
     m.phase=phase;m.phaseRevision++;m.phaseStartsAt=now;
     const duration=phase==='preparation'?(m.round===1?DURATION.preparation_first:DURATION.preparation):DURATION[phase];
-    m.phaseEndsAt=now+duration;m.phaseReady=new Set();
-    for(const p of m.players)p.ready=false;
+    m.phaseEndsAt=now+duration;m.phaseReady=new Set();m.aiReadyAt={};
+    for(const p of m.players){
+      p.ready=false;
+      if(isBot(p)&&isLive(p)&&READY_PHASES.has(phase))
+        m.aiReadyAt[p.id]=now+aiReadyDelay(m,p,phase,duration);
+    }
     if(phase==='connection_check')m.initialConnectionStartedAt=now;
     if(phase==='combat')assignFields(m);
     emit(m,'phase_start',{phase,round:m.round,phaseRevision:m.phaseRevision,phaseStartsAt:now,phaseEndsAt:m.phaseEndsAt});
@@ -82,16 +99,29 @@ function create({record,finishMatch,clock=Date.now}) {
     const now=current();p.lastSeenAt=now;p.connected=true;
     // Presence is reported through state snapshots and phase events, not as a revision every second.
   }
+  // Human and AI Ready checks go through the same server bookkeeping/event path.
+  // Duplicate acknowledgments are idempotent within a single phase revision.
+  function markReady(m,p,source){
+    if(m.phaseReady.has(p.id))return false;
+    m.phaseReady.add(p.id);p.ready=true;
+    emit(m,'phase_ready',{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision,
+      source},p);
+    return true;
+  }
+  function simulateAiReady(m,now){
+    if(!READY_PHASES.has(m.phase))return;
+    for(const p of m.players){
+      if(!isBot(p)||!isLive(p)||!p.accepted||m.phaseReady.has(p.id))continue;
+      if(now>=(m.aiReadyAt?.[p.id]??Infinity))markReady(m,p,'server_ai');
+    }
+  }
   function ready(m,p,data){
+    if(isBot(p))throw Error('AI readiness is server controlled');
     if(!p.accepted||!isLive(p))throw Error('Not an active accepted player');
     if(!validPhase(m,data))throw Error('Stale phase; request updated match state');
-    if(!['preparation','prep_sync','results','boss_results','special_shop'].includes(m.phase))
-      throw Error('This phase does not accept ready acknowledgments');
+    if(!READY_PHASES.has(m.phase))throw Error('This phase does not accept ready acknowledgments');
     seen(m,p);
-    if(!m.phaseReady.has(p.id)){
-      m.phaseReady.add(p.id);p.ready=true;
-      emit(m,'phase_ready',{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision},p);
-    }
+    markReady(m,p,'player');
     tick(m);
   }
   function confirmBattlefield(m,p,data){
@@ -223,7 +253,9 @@ function create({record,finishMatch,clock=Date.now}) {
   function tick(m){
     if(m.ended)return;
     const now=current();
+    simulateAiReady(m,now);
     if(m.phase==='awaiting_acceptance'){
+
       if(now>=m.phaseEndsAt)finishMatch(m,'match-acceptance-timeout');return;
     }
     if(m.phase==='connection_check'){
@@ -239,11 +271,13 @@ function create({record,finishMatch,clock=Date.now}) {
       return;
     }
     if(m.phase==='preparation'){
-      if(allReady(m)||now>=m.phaseEndsAt)startPhase(m,'prep_sync',now);
+      // Never shorten the shared preparation clock, even with 8/8 Ready.
+      if(now>=m.phaseEndsAt)startPhase(m,'prep_sync',now);
       return;
     }
     if(m.phase==='prep_sync'){
-      if(allReady(m)||now>=m.phaseEndsAt)startPhase(m,'combat',now);
+      // The full server-owned synchronization window prevents an early start.
+      if(now>=m.phaseEndsAt)startPhase(m,'combat',now);
       return;
     }
     if(m.phase==='combat'){
@@ -262,9 +296,10 @@ function create({record,finishMatch,clock=Date.now}) {
   // Read-only coordinator status for diagnostics. Never includes tokens or
   // secret test-state; phase and acknowledgments are scoped per match.
   function serverAction(m){
-    const human=liveHumans(m);
-    const ready=human.filter(p=>m.phaseReady.has(p.id)).length;
-    const total=human.length;
+    const participants=liveParticipants(m);
+    const bots=participants.filter(isBot);
+    const ready=participants.filter(p=>m.phaseReady.has(p.id)).length;
+    const total=participants.length;
     const labels={
       awaiting_acceptance:'Waiting for match acceptance',
       connection_check:'Checking player connections',
@@ -277,9 +312,10 @@ function create({record,finishMatch,clock=Date.now}) {
     };
     const fields=m.battlefields||[];
     const checked=fields.reduce((sum,f)=>sum+Object.values(f.checks||{}).filter(Boolean).length,0);
-    const expected=fields.reduce((sum,f)=>sum+f.playerIds.filter(id=>human.some(p=>p.id===id)).length,0);
+    const expected=fields.reduce((sum,f)=>sum+f.playerIds.filter(id=>participants.some(p=>p.id===id&&!isBot(p))).length,0);
     return {code:m.phase,label:labels[m.phase]||'Updating match',
       round:m.round,phaseRevision:m.phaseRevision,readyCount:ready,readyExpected:total,
+      aiReadyCount:bots.filter(p=>m.phaseReady.has(p.id)).length,aiReadyExpected:bots.length,
       checkedFields:checked,expectedFieldChecks:expected,
       completedFields:fields.filter(f=>f.status==='completed').length,totalFields:fields.length};
   }
@@ -288,7 +324,7 @@ function create({record,finishMatch,clock=Date.now}) {
     return {...base,protocol:3,phase:m.phase,round:m.round,
       phaseRevision:m.phaseRevision,phaseStartsAt:m.phaseStartsAt,phaseEndsAt:m.phaseEndsAt,
       acceptDeadline:m.acceptDeadline,initialConnectionChecked:m.initialConnectionChecked,
-      readyCount:m.phaseReady.size,battleRevision:m.battleRevision,serverAction:serverAction(m),
+      readyCount:liveParticipants(m).filter(p=>m.phaseReady.has(p.id)).length,battleRevision:m.battleRevision,serverAction:serverAction(m),
       battlefields:m.battlefields.map(f=>({id:f.id,round:f.round,phaseRevision:f.phaseRevision,
         kind:f.kind,playerIds:f.playerIds,checks:{...(f.checks||{})},ghostSourceId:f.ghostSourceId||null,ghostDice:f.ghostDice||[],status:f.status,winnerId:f.winnerId,
         unverified:f.unverified,reportedOutcomes:Object.fromEntries(Object.entries(f.reports).map(([id,r])=>[id,r.outcome]))})),
