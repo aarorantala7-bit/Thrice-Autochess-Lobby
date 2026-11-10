@@ -289,7 +289,11 @@ http.createServer(async(req,res)=>{
  try{
   if(req.method==='OPTIONS')return send(res,204,{});
   const url=new URL(req.url,'http://localhost');
-  if(req.method==='GET'&&url.pathname==='/health')return send(res,200,{ok:true,service:'Thrice Autochess shared action server',sharedActionState:true,activeMatchCount:matches.size,battlesSynchronized:false});
+  if(req.method==='GET'&&url.pathname==='/health'){
+   try{if(!(await v25430Identity.health()))throw Error('Profile identity database unavailable');
+    return send(res,200,{ok:true,service:'Thrice Autochess protocol-3 test server',protocol:3,profileDatabase:true,serverOwnedPhaseClock:true,activeMatchCount:matches.size});
+   }catch{return send(res,503,{ok:false,error:'Profile identity database unavailable'});}
+  }
   if(url.pathname.startsWith('/api/'))return await api(req,res,url);
   if(!['GET','HEAD'].includes(req.method))return send(res,405,{error:'Method not allowed.'});
   let requested;
