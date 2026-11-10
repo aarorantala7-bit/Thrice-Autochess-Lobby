@@ -9,7 +9,12 @@ test('odd survivor tournament receives one ghost field without reviving the elim
  const m={id:'test-match',mode:'normalTournament',round:1,players,ended:false};
  ctrl.init(m);for(const p of players)ctrl.accept(m,p);
  clock=1100;ctrl.tick(m);
- for(let i=0;i<2;i++){for(const p of players.filter(p=>!p.eliminated))ctrl.ready(m,p,{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision});}
+ for(const p of players.filter(p=>!p.eliminated))ctrl.ready(m,p,{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision});
+ assert.equal(m.phase,'preparation');
+ clock=m.phaseEndsAt+1;ctrl.tick(m);
+ assert.equal(m.phase,'prep_sync');
+ for(const p of players.filter(p=>!p.eliminated))ctrl.ready(m,p,{phase:m.phase,round:m.round,phaseRevision:m.phaseRevision});
+ clock=m.phaseEndsAt+1;ctrl.tick(m);
  assert.equal(m.phase,'combat');
  const ghost=m.battlefields.filter(f=>f.kind==='ghost');
  assert.equal(ghost.length,1);assert.equal(ghost[0].ghostSourceId,'P1');
