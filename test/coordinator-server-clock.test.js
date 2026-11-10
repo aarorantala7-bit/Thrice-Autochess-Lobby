@@ -16,8 +16,11 @@ test('protocol 3 server sends stable countdown deadline with authority flag',()=
  assert.equal(s.phaseEndsAt,deadline);assert.equal(s.phaseRevision,revision);
 });
 test('server deadlines handle normal and boss->special_shop without repeating startup freeze',()=>{
- const a=h();for(let r=1;r<=4;r++){a.ready();a.ready();a.next(35001);a.next(10001);}
- a.ready();a.ready();assert.equal(a.m.round,5);a.next(35001);assert.equal(a.m.phase,'boss_results');
+ const a=h();for(let r=1;r<=4;r++){
+   a.ready();a.next(a.m.phaseEndsAt-(a.m.phaseStartsAt)+(r===1?1:1)); // Countdown not bypassed by Ready
+   a.ready();a.next(12001);a.next(35001);a.next(10001);
+ }
+ a.ready();a.next(35001);a.ready();a.next(12001);assert.equal(a.m.round,5);a.next(35001);assert.equal(a.m.phase,'boss_results');
  a.next(10001);assert.equal(a.m.phase,'special_shop');a.next(20001);
  assert.equal(a.m.phase,'preparation');assert.equal(a.m.round,6);
  assert.equal(a.events.filter(e=>e.type==='phase_start'&&e.detail.phase==='connection_check').length,1);
