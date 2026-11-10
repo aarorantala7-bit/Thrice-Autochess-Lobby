@@ -1,0 +1,22 @@
+name: Live Thrice AI Ready synchronization check
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - qa/2026-11-10-live-protocol3-smoke
+    paths:
+      - test/live-ai-ready.mjs
+      - .github/workflows/live-ai-ready.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Confirm live AI Ready events and phase deadlines
+        run: node test/live-ai-ready.mjs
