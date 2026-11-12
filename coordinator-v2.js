@@ -264,8 +264,10 @@ function create({record,finishMatch,clock=Date.now}) {
         startPhase(m,'preparation',now);return;
       }
       if(now>=m.phaseEndsAt){
-        for(const p of liveHumans(m))if(now-p.lastSeenAt>OFFLINE_MS){p.eliminated=true;p.forfeitedBeforeStart=true;emit(m,'startup_disconnected',{playerId:p.id},p);}
-        if(!m.players.some(isLive)){finishMatch(m,'no-players-connected');return;}
+        // Do not eliminate absent players at the 60-second connection check.
+        // The match recovery service gives accepted players a full 180 seconds
+        // to reconnect, and alone decides when that grace has expired.
+        // The phase clock continues for connected participants meanwhile.
         startPhase(m,'preparation',now);
       }
       return;
