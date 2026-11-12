@@ -804,3 +804,14 @@ setInterval(()=>{
     }
   }
 },500).unref();
+
+
+// ===== v00.30.00.21d: recoverable disconnect and self-scoped test cleanup =====
+const v21dMatchRecovery=require('./match-recovery-v21d')({
+ getApi:()=>api,setApi:fn=>{api=fn;},
+ getMatchResponse:()=>matchResponse,setMatchResponse:fn=>{matchResponse=fn;},
+ getPublicMatch:()=>publicMatch,setPublicMatch:fn=>{publicMatch=fn;},
+ matches,rooms,soloTickets,record,finishMatch,
+ receive,send,err,manager:v2Coordinator,
+ verifyProfile:(profileId,profileSecret)=>v25430Identity.verify(profileId,profileSecret)
+});
