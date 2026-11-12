@@ -691,3 +691,116 @@ const v2Coordinator=require('./server-v2-adapter')({
  getApi:()=>api,setApi:fn=>{api=fn;},
  matches,record,finishMatch,accessibleMatch,send,receive,err
 });
+
+
+// ===== v00.30.00.21d: server-owned rejoin window and profile-scoped match recovery =====
+// All deadlines and match deletions are determined on the server, never by device clocks.
+const V21D_REJOIN_WINDOW_MS=180000;
+const V21D_OFFLINE_MS=8000;
+const v21dEarlierPublicMatch=publicMatch;
+publicMatch=function(m){
+  const value=v21dEarlierPublicMatch(m);
+  if(m.protocol!==3)return value;
+  return {...value,players:value.players.map(player=>{
+    const p=m.players.find(x=>x.id===player.id);
+    return {...player,rejoinDeadlineAt:p?.rejoinDeadlineAt||null,
+      connectionState:p?.eliminated?'departed':p?.rejoinDeadlineAt?'rejoining':'connected'};
+  })};
+};
+const v21dEarlierMatchResponse=matchResponse;
+matchResponse=function(id,token,since){
+  const m=matches.get(String(id||''));
+  const p=m?.players.find(x=>x.token===token&&!x.eliminated&&!x.bot);
+  if(p&&p.rejoinDeadlineAt){
+    p.rejoinDeadlineAt=null;
+    p.temporarilyAway=false;
+    record(m,p,'player_rejoined',{});
+  }
+  return v21dEarlierMatchResponse(id,token,since);
+};
+const v21dEarlierApi=api;
+api=async function(req,res,url){
+  const route=url.pathname;
+  if(route==='/api/admin/forceTerminateMyMatches'){
+    if(req.method!=='POST')return send(res,405,{error:'Use POST.'});
+    const d=await receive(req);
+    if(!(await v25430Identity.verify(d.profileId,d.profileSecret)))
+      throw err('Verified player identity required for match cleanup.',403);
+    const terminated=[];
+    for(const m of [...matches.values()]){
+      if(!m.players.some(p=>p.profileId===d.profileId))continue;
+      terminated.push(m.id);
+      finishMatch(m,'admin-terminated');
+      const receipt=completedMatches.get(m.id);
+      if(receipt?.summary){
+        receipt.summary.status='admin_terminated';
+        receipt.summary.reason='admin-terminated';
+      }
+    }
+    let clearedTickets=0,clearedQueues=0;
+    for(const [id,t] of [...soloTickets]){
+      if(t.player?.profileId===d.profileId){soloTickets.delete(id);clearedTickets++;}
+    }
+    for(const r of rooms.values()){
+      if(!r.players.some(p=>p.profileId===d.profileId))continue;
+      if(r.queued&&!r.matchId){r.queued=false;r.queuedAt=null;clearedQueues++;}
+      if(r.matchId&&!matches.has(r.matchId)){r.matchId=null;r.queued=false;r.queuedAt=null;clearedQueues++;}
+      r.players.forEach(p=>p.ready=false);
+      r.lastActive=Date.now();
+    }
+    return send(res,200,{ok:true,status:'admin_terminated',terminatedMatchIds:terminated,
+      clearedTickets,clearedQueues,activeMatchesRemainingForProfile:0,serverNow:Date.now(),
+      historyReconciliation:'Mark local in_progress entries for this verified profile admin_terminated; preserve their diagnostic records.'});
+  }
+  if(route==='/api/matchPause'||route==='/api/matchRejoin'){
+    if(req.method!=='POST')return send(res,405,{error:'Use POST.'});
+    const d=await receive(req),{m,p}=accessibleMatch(d.matchId,d.token);
+    if(m.protocol!==3||p.bot||p.eliminated)throw err('An active human protocol-3 match is required.',409);
+    if(route==='/api/matchPause'){
+      p.rejoinDeadlineAt=Date.now()+V21D_REJOIN_WINDOW_MS;
+      p.lastSeenAt=Date.now()-V21D_OFFLINE_MS-1;
+      p.connected=false;p.temporarilyAway=true;
+      record(m,p,'player_temporarily_left',{rejoinDeadlineAt:p.rejoinDeadlineAt});
+      return send(res,200,{ok:true,matchId:m.id,rejoinDeadlineAt:p.rejoinDeadlineAt,
+        rejoinWindowMs:V21D_REJOIN_WINDOW_MS,serverNow:Date.now()});
+    }
+    v2Coordinator.seen(m,p);
+    p.rejoinDeadlineAt=null;p.temporarilyAway=false;
+    record(m,p,'player_rejoined',{});
+    return send(res,200,matchResponse(m.id,p.token,d.since||0));
+  }
+  return v21dEarlierApi(req,res,url);
+};
+// Prevent the initial connection-check gate from forfeiting an accepted player
+// while their server-owned rejoin window is still open.
+const v21dOriginalTick=v2Coordinator.tick;
+v2Coordinator.tick=function(m){
+  if(m.protocol===3&&m.phase==='connection_check'&&m.phaseEndsAt<=Date.now()){
+    const pending=m.players.filter(p=>!p.bot&&!p.eliminated&&p.accepted&&p.rejoinDeadlineAt>Date.now());
+    if(pending.length)m.phaseEndsAt=Math.max(m.phaseEndsAt,...pending.map(p=>p.rejoinDeadlineAt));
+  }
+  return v21dOriginalTick(m);
+};
+setInterval(()=>{
+  const now=Date.now();
+  for(const m of [...matches.values()]){
+    if(m.protocol!==3)continue;
+    if(!m.players.some(p=>!p.bot&&!p.eliminated)){
+      finishMatch(m,'ai-only-after-permanent-leave');continue;
+    }
+    for(const p of m.players){
+      if(p.bot||p.eliminated||!p.accepted)continue;
+      if(p.rejoinDeadlineAt&&now>=p.rejoinDeadlineAt){
+        record(m,p,'rejoin_window_expired',{deadline:p.rejoinDeadlineAt});
+        v2Coordinator.forfeit(m,p);
+        if(matches.has(m.id)&&!m.players.some(x=>!x.bot&&!x.eliminated))
+          finishMatch(m,'ai-only-after-permanent-leave');
+        break;
+      }
+      if(!p.rejoinDeadlineAt&&now-p.lastSeenAt>V21D_OFFLINE_MS){
+        p.rejoinDeadlineAt=now+V21D_REJOIN_WINDOW_MS;p.connected=false;
+        record(m,p,'rejoin_window_started',{rejoinDeadlineAt:p.rejoinDeadlineAt});
+      }
+    }
+  }
+},500).unref();
